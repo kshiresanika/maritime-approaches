@@ -1,0 +1,31 @@
+# RESTRICTED — constraint 9. These reference the mothership/child-drone work and FARU.
+EDTH_Hamburg_Topic02_COMPLETE.md
+00_SHARED_macOS_Demo_Architecture.md
+
+# Bulk AIS — 6.4 GB. Cannot be cleanly removed from git history once pushed.
+02_data/raw/
+*.zip
+# Slices: fehmarn_belt.csv is 248 MB, over GitHub's 100 MB per-file limit.
+# Commit lane A's <=10 MB golden window instead.
+02_data/slices/
+
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.pt
+.env
+*.env
+.DS_Store
+
+# Appended at first publish: hard exclusions for GitHub limits.
+yolov8n.pt
+02_data/**/*.csv
+02_data/**/*.zip
+*.log
+
+# Appended at first publish: hard exclusions for GitHub limits.
+yolov8n.pt
+02_data/**/*.csv
+02_data/**/*.zip
+*.log

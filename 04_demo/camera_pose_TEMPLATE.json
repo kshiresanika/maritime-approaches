@@ -1,0 +1,10 @@
+{
+  "pose_ref": "elbe-venue-window-2026-08-28",
+  "yaw_deg_true": 0.0,
+  "hfov_deg": 0.0,
+  "yaw_uncertainty_deg": 5.0,
+  "lat_deg": null,
+  "lon_deg": null,
+  "height_m": null,
+  "note": "FILL BEFORE USING FOR EVIDENCE. yaw_deg_true is the compass bearing the camera boresight points at, degrees TRUE. hfov_deg is the horizontal field of view of the FULL frame -- measure it, do not copy a spec sheet: point the camera at two landmarks whose bearings you know, put each at a frame edge, the difference is the HFOV. yaw_uncertainty_deg of 5.0 is what a phone compass gives you; a surveyed bearing gets 1.0. This number goes straight into every bearing sigma and therefore into every SPOOF confidence."
+}
