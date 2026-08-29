@@ -171,6 +171,11 @@ more credible than a team that claims a sea trial nobody can verify.
 ## Setup checklist (do Saturday morning, not Sunday)
 
 - [x] `make_synthetic_eo.py` written
+- [ ] **REGENERATE THE SCENE FIRST.** `04_demo/out/scene01/` predates the prioritizer
+      reweighting and the deferral-damping fix, so the console currently shows weights
+      `prioritizer.py`'s own comment repudiates, and 6 of 8 case files render
+      `BREAKDOWN DOES NOT SUM`. Three commands, in `00_brief/judging_criteria.md`.
+      Nothing else on this list is worth doing until this one is done.
 - [ ] `make_golden_window.py` run — `02_data/golden/` is still EMPTY, D0 cannot run without it
 - [ ] D0 running end to end on the Mac
 - [ ] Golden window loaded, 139 vessels, 1 h, pseudonymised

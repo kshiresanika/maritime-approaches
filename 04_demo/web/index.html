@@ -11,16 +11,21 @@
     --accent:#4a9fd8;
   }
   *{box-sizing:border-box}
+  /* FLEX COLUMN, NOT A HARDCODED HEADER HEIGHT. `main` was sized calc(100vh - 46px);
+     the header renders 107.5 px at 1920x1080 because the chip row wraps, so the page
+     came out 1142 px tall in a 1080 px viewport and the bottom of the evidence pane
+     sat below the fold. Flex takes whatever is actually left, at any header height. */
   body{margin:0;background:var(--bg);color:var(--ink);
+       display:flex;flex-direction:column;height:100vh;overflow:hidden;
        font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-  header{display:flex;align-items:baseline;gap:16px;padding:10px 16px;
-         border-bottom:1px solid var(--line);background:var(--panel)}
+  header{display:flex;align-items:baseline;gap:16px;padding:10px 16px;flex:none;
+         flex-wrap:wrap;border-bottom:1px solid var(--line);background:var(--panel)}
   header h1{font-size:14px;margin:0;letter-spacing:.08em;text-transform:uppercase}
   .mode{font-size:11px;padding:2px 8px;border:1px solid var(--accent);
         color:var(--accent);border-radius:2px}
   .caveat{margin-left:auto;font-size:11px;color:var(--dim);max-width:46ch;text-align:right}
   main{display:grid;grid-template-columns:minmax(420px,1fr) minmax(380px,520px);
-       gap:1px;background:var(--line);height:calc(100vh - 46px)}
+       gap:1px;background:var(--line);flex:1;min-height:0}
   section{background:var(--bg);overflow:auto;padding:12px}
   h2{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim);
      margin:0 0 10px}
@@ -159,6 +164,15 @@ function isInjected(r){
   if(String(f).startsWith('injected://')) return true;
   return ((r&&r.frame_refs)||[]).some(x=>String(x).startsWith('injected://'));
 }
+/* SYNTHETIC PROVENANCE — a separate class from an injection; see the note in
+   03_src/web/index.html. `synthetic://` is stamped on EVERY contact of a replay scene
+   by 04_demo/make_synthetic_eo.py: no camera observed any of it. Recognising only
+   `injected://` made this chip read "INJECTED —" over a wholly constructed scene. */
+function isSynthetic(r){
+  const f=(r&&r.eo_contact&&r.eo_contact.frame_ref)||'';
+  if(String(f).startsWith('synthetic://')) return true;
+  return ((r&&r.frame_refs)||[]).some(x=>String(x).startsWith('synthetic://'));
+}
 function injectedScenario(r){
   const f=(r&&r.eo_contact&&r.eo_contact.frame_ref)
     ||((r&&r.frame_refs)||[]).find(x=>String(x).startsWith('injected://'))||'';
@@ -199,15 +213,26 @@ function renderInjectChip(){
   const el=document.getElementById('cInject'); if(!el) return;
   const recs=DATA.records||[];
   const any=recs.some(isInjected);
+  const anySynth=recs.some(isSynthetic);
   /* OR, not AND. 03_src/server.py sets body["injection"] on /api/state precisely so
      the console does not have to derive this from frame_ref alone: a scene whose
      injected contact has scrolled out of the served records would otherwise look
      clean, and "clean" is the one thing this must never say when it is not true. */
-  const on=any||!!DATA.injection;
+  const on=any||anySynth||!!DATA.injection;
   el.classList.toggle('on',on);
+  /* An em-dash used to mean "nothing injected", which reads as "these are
+     observations". It now appears only when the scene really is camera-observed. */
   const scen=(DATA.injection&&DATA.injection.scenario)
-    ||(any?injectedScenario(recs.find(isInjected)):'—');
-  el.textContent='INJECTED '+(on?scen:'—');
+    ||(any?injectedScenario(recs.find(isInjected))
+         :anySynth?'SYNTHETIC EO'
+         :'camera-observed');
+  el.textContent='PROVENANCE '+scen;
+  /* The full sentence goes on the caveat line, which has the width for it. A chip long
+     enough to wrap the header is what pushed this page below the fold. */
+  el.title=anySynth&&!any
+    ? 'Every contact in this scene was forward-projected from AIS through a declared '
+      +'camera pose. No camera observed any of it.'
+    : 'which sensor produced the contacts on this screen';
 }
 
 async function poll(){
@@ -397,7 +422,8 @@ function drawList(){
       (p.time_to_intercept_min!=null?` · ${p.time_to_intercept_min.toFixed(0)} min out`:'')+
       `</div>`+
       `<div class="meta">`+
-      (isInjected(r)?`<span class="tag inj">INJECTED · ${injectedScenario(r)}</span> `:'')+
+      (isInjected(r)?`<span class="tag inj">INJECTED · ${injectedScenario(r)}</span> `
+                    :isSynthetic(r)?`<span class="tag inj">SYNTHETIC · NO CAMERA</span> `:'')+
       (v.defer_to_human?`<span class="tag defer">DEFER TO HUMAN</span> `:'')+
       (p.scarce_asset_recommended?`<span class="tag send">RECOMMEND ASSET</span>`:'')+
       `</div>`+
@@ -476,6 +502,13 @@ function drawEvidence(r){
   // a scripted contact that reads like a real detection is the single most
   // misleading thing this console could put in front of a judge.
   h+=`<h2 style="margin-top:12px">Limitations</h2>`+
+     (!isInjected(r)&&isSynthetic(r)
+       ?`<div class="lim" style="border-left-color:var(--unknown);color:var(--unknown);font-weight:700">`+
+        `THIS CONTACT WAS NOT OBSERVED BY A CAMERA. It was forward-projected from the AIS `+
+        `claim through a declared camera pose and perturbed with a measurement-error model. `+
+        `Any rate derived from this scene measures the decision logic against a model of a `+
+        `camera, never against the sea.</div>`
+       :'')+
      (isInjected(r)
        ?`<div class="lim" style="border-left-color:var(--unknown);color:var(--unknown);font-weight:700">`+
         `THIS CONTACT WAS INJECTED by the operator as a scripted demonstration `+

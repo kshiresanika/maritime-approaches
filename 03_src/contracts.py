@@ -504,9 +504,26 @@ class EvidenceRecord(_Contract):
 # ================================================================================
 
 SensorKind = Literal[
-    "edge_pi",     # Raspberry Pi at the water's edge, classical CV, NO AIS access
-    "mac_camera",  # the MacBook camera — the T2 live path
-    "file",        # a recorded scene replayed from disk — the T1 guaranteed path
+    # RETIRED 2026-08-29. The Raspberry Pi node is no longer part of the rig; the EO
+    # source is now a video this machine decodes. THE MEMBER IS KEPT, NOT DELETED,
+    # because operator_audit.jsonl and every evidence record written before today
+    # carries this value. A Literal that can no longer parse its own audit trail turns
+    # a historical case file into a validation error, which is precisely the opposite
+    # of what criterion 4 asks of us. Nothing emits it any more: source_switch.py no
+    # longer offers it as a selectable source.
+    "edge_pi",
+    "mac_camera",    # a lens on THIS machine — the live-lens path
+    "video_stream",  # imagery this machine DECODES and detects on, now: a video file
+                     # on disk, or a network stream (HTTP/HLS/RTSP). This is the EO
+                     # source that replaced the Pi.
+    "file",          # a recorded SCENE replayed from disk — contacts already computed,
+                     # not imagery being detected on now. The T1 guaranteed path.
+                     #
+                     # 'file' vs 'video_stream' is the difference between REPLAYING a
+                     # finished observation and MAKING one. They are kept apart on
+                     # purpose: collapsing them would let a projection be presented on
+                     # a watch screen as an observation, which is the one substitution
+                     # this whole tool exists to prevent.
 ]
 
 OperatorActionType = Literal[

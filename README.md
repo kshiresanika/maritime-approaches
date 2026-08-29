@@ -134,7 +134,7 @@ of any kind** and never did:
 | Stage | Technique | AI? |
 |---|---|---|
 | AIS ingest | pandas, chunked streaming, explicit `dd/mm/yyyy` parse, dedupe | none |
-| Detection | MOG2 background subtraction + connected components (`pi_sensor.py`) | **none** |
+| Detection | MOG2 background subtraction + connected components (`pi_sensor.py`, on a video file / network stream / local lens) | **none** |
 | Bearing | `atan2` pinhole model | none |
 | Range | waterline depression angle, `h / tan(d)` | none |
 | Association | geodesics, dead reckoning, chi-square residual, Jonker–Volgenant | none |
@@ -287,7 +287,7 @@ The app is Python standard library only and the page loads nothing from the netw
 no CDN, no map tiles, no fonts. It runs with the wifi off, which at a hackathon venue is
 not a nicety.
 
-**The sensor node** (`04_demo/pi_sensor.py`) runs on a Raspberry Pi with a camera module
+**The sensor node** (`04_demo/pi_sensor.py`) reads a video file, a network stream or a lens on this machine (the Raspberry Pi was retired on 2026-08-29 — see `04_demo/VIDEO_SOURCES.md`)
 and needs only `opencv-python` and `numpy`. It detects hulls with background subtraction
 and connected components — **no neural network** — computes bearing through the same
 pinhole model and range from the waterline depression angle, and POSTs EoContact JSON to

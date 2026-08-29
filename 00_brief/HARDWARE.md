@@ -1,3 +1,16 @@
+> ## ⚠️ RETIRED — 2026-08-29
+>
+> **The Raspberry Pi and its camera module are out of the rig.** This document is kept
+> as the record of a path that was planned and not taken; nothing in it is current.
+>
+> The EO source is now a video this machine decodes — a file on disk or a network
+> stream. See **`04_demo/VIDEO_SOURCES.md`** for what actually runs.
+>
+> Consequently dead: `99_scratch/probe_pi.sh`, `99_scratch/probe_pi_mac.sh`, the
+> `MAC_IP`/`PI_IP` bring-up order below, and every UNMEASURED row in sections 1-4.
+> `03_src/edge_client.py` still works — it is a client of *any* remote sensor node, not
+> of a Pi specifically — but nothing in the demo path uses it.
+
 # HARDWARE.md — Lane F
 
 **Created 2026-08-29. Status: SCAFFOLD + THREE FINDINGS. All hardware measurements are UNMEASURED.**

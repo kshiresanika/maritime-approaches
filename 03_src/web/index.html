@@ -38,7 +38,9 @@
 
   COLOURS ARE MEASURED, NOT CHOSEN BY EYE. Every value in :root below was run through
   99_scratch/lane_e_contrast.py against all three backgrounds it can appear on. Gate:
-  7:1 for text (WCAG AAA), 3:1 for meaningful non-text. 14/14 pass. Two were changed
+  7:1 for text (WCAG AAA), 3:1 for meaningful non-text. 18/18 pass -- 14 palette
+  colours against all three grounds, plus the 4 inverted solid badges, which are a
+  different pair entirely and were once missed for that reason. Two were changed
   because they failed: the SPOOF red passed on the panel at 7.26:1 and FAILED on a
   SELECTED row at 6.50:1 — and a SPOOF row is exactly the row that gets selected.
   Change a colour here and re-run that script.
@@ -163,6 +165,16 @@ header h1 .sub{color:var(--muted);font-weight:600;letter-spacing:.02em}
 #noVideo strong{display:block;color:var(--dark);font-size:var(--f-lead);letter-spacing:.06em;margin-bottom:8px}
 #sensorBadges{position:absolute;left:8px;top:8px;display:flex;gap:7px;flex-wrap:wrap;z-index:5}
 #sensorBadges .chip{background:rgba(8,11,16,.88);backdrop-filter:blur(3px)}
+#videoSync{
+  /* Sits under the badges, above the footer. Amber for "not guaranteed", red for
+     "unrelated" — the two are different claims and must not look the same. Contrast
+     is checked against --panel at AAA like every other text colour on this console. */
+  position:absolute; left:10px; right:10px; top:44px; z-index:5;
+  font:600 12px/1.45 ui-monospace,Menlo,monospace; letter-spacing:.02em;
+  padding:7px 10px; border-radius:6px;
+  background:rgba(0,0,0,.82); color:#ffd166; border:1px solid #ffd166;
+}
+#videoSync.warn{ color:#ff8f8f; border-color:#ff8f8f; }
 #sensorFoot{
   position:absolute;left:8px;right:8px;bottom:6px;z-index:5;
   font-size:var(--f-micro);color:var(--muted);background:rgba(8,11,16,.88);
@@ -332,6 +344,32 @@ body.degraded .pane>h2::after{content:" · STALE";color:var(--dark);font-weight:
 }
 #idAlarm.on{display:block}
 .hint{color:var(--muted);font-size:var(--f-micro);letter-spacing:.04em}
+
+/* ---- scene provenance bar -------------------------------------------------
+   A row of #app, not of #grid: #grid's rows are proportional (42fr/58fr) and an extra
+   child would land in one of them and deform the panes. As an implicit auto row of
+   #app it takes its own height and #grid's minmax(0,1fr) yields exactly that much, so
+   the page still totals 100vh and nothing is pushed below the fold. */
+#sceneCaveat{
+  display:none;background:#2a2410;border-bottom:2px solid var(--defer);
+  color:var(--fg);padding:6px clamp(10px,1vw,18px);
+  font-size:var(--f-label);font-weight:700;line-height:1.35;
+}
+#sceneCaveat.on{display:block}
+#sceneCaveat b{color:var(--defer);letter-spacing:.06em}
+
+/* ---- licence attribution --------------------------------------------------
+   MEASURED DEFECT THIS FIXES: as a sibling AFTER #app (height:100vh) under a body with
+   overflow:hidden, this block rendered at y=1080 in a 1080 px viewport -- present in
+   the DOM, reachable by no viewer, and breaking the invariant this file's own header
+   asserts (scrollHeight <= innerHeight). CC-BY 4.0 attribution is a CONDITION OF USE;
+   discharging it into an unreachable region does not discharge it. It is now the last
+   auto row INSIDE #app. */
+#attribBlock{
+  padding:5px clamp(10px,1vw,18px);font-size:var(--f-micro);line-height:1.45;
+  color:var(--muted);border-top:1px solid var(--rule);background:var(--panel);
+}
+#attribBlock a{color:var(--accent)}
 </style>
 </head>
 <body>
@@ -348,6 +386,8 @@ body.degraded .pane>h2::after{content:" · STALE";color:var(--dark);font-weight:
   <span class="chip">operator <input id="opid" value="operator-1" aria-label="operator id" spellcheck="false"></span>
   <span class="chip" id="cClock"><span class="mono" id="tClock">--:--:--</span> UTC</span>
 </header>
+
+<div id="sceneCaveat" role="note"></div>
 
 <div id="grid">
   <div id="linkBanner" role="status" aria-live="polite"></div>
@@ -366,6 +406,7 @@ body.degraded .pane>h2::after{content:" · STALE";color:var(--dark);font-weight:
           <span class="chip" id="cFps">fps <b id="tFps">—</b></span>
           <span class="chip" id="cNode"><span class="dot" id="dNode"></span><span id="tNode">no node</span></span>
         </div>
+        <div id="videoSync" class="hidden"></div>
         <div id="sensorFoot"></div>
       </div>
     </div>
@@ -409,6 +450,22 @@ body.degraded .pane>h2::after{content:" · STALE";color:var(--dark);font-weight:
     </div>
   </section>
 
+</div>
+
+<div id="attribBlock">
+  <!-- ATTRIBUTION BLOCK. CC-BY 4.0 attribution is a CONDITION OF USE, not a courtesy,
+       and it was recorded in three internal files while appearing on no surface a
+       reader ever sees. The plan was to satisfy it on a pitch slide; 05_pitch/ is
+       empty. It is discharged here instead, beside the map it applies to.
+       IT LIVES INSIDE #app: as a sibling after it, it rendered at y=1080 in a 1080 px
+       viewport under body{overflow:hidden} and no viewer could reach it. -->
+  Map rendering: <a href="https://leafletjs.com/">Leaflet</a> 1.9.4 (BSD-2-Clause).
+  &nbsp;·&nbsp; AIS: Danish Maritime Authority, act 596/2005 — redistribution not
+  addressed; identities pseudonymised on every outbound route.
+  &nbsp;·&nbsp; Vessel detection (YOLO path): Ultralytics AGPL-3.0-or-later; COCO
+  annotations CC BY 4.0 © COCO Consortium.
+  &nbsp;·&nbsp; Coastline (EEA, CC BY 4.0) is registered in 02_data/DATASETS.md and is
+  NOT in use on this build — no land-crossing check has run.
 </div>
 </div>
 
@@ -776,6 +833,17 @@ function renderLink() {
   const flashing = Date.now() < flashUntil;
   document.body.classList.toggle("degraded", !live && S.transport !== "poll");
 
+  /* Rendered on every tick rather than once at load: /api/state is re-applied by the
+     poll fallback, and a provenance statement that can be cleared by a refresh is not
+     a provenance statement. */
+  const cav = $("sceneCaveat");
+  if (S.stage && S.stage.caveat) {
+    cav.replaceChildren();
+    cav.appendChild(el("b", null, "SCENE PROVENANCE — "));
+    cav.appendChild(el("span", null, S.stage.caveat));
+    cav.classList.add("on");
+  } else { cav.classList.remove("on"); }
+
   if (live && !flashing) { b.classList.remove("on"); b.replaceChildren(); return; }
 
   b.replaceChildren();
@@ -806,6 +874,19 @@ function isInjected(rec) {
   const f = rec?.eo_contact?.frame_ref || "";
   if (f.startsWith("injected://")) return true;
   return (rec?.frame_refs || []).some(x => String(x).startsWith("injected://"));
+}
+/* SYNTHETIC PROVENANCE — a SEPARATE class from an injection, and both must show.
+   `injected://` is stamped by server.py when an operator plants a fault live.
+   `synthetic://` is stamped by 04_demo/make_synthetic_eo.py on EVERY contact in a
+   replay scene, because the whole electro-optical stream is forward-projected from AIS
+   through a declared camera pose. No camera observed any of it.
+   Recognising only the first is how this console came to render "injected —" over a
+   scene that was constructed end to end. A screen that says nothing about provenance
+   is read as a screen reporting observations. */
+function isSynthetic(rec) {
+  const f = rec?.eo_contact?.frame_ref || "";
+  if (f.startsWith("synthetic://")) return true;
+  return (rec?.frame_refs || []).some(x => String(x).startsWith("synthetic://"));
 }
 function injectedScenario(rec) {
   const f = rec?.eo_contact?.frame_ref
@@ -935,7 +1016,11 @@ function whatWouldChange(rec) {
 /* ===========================================================================
    5. PANE 1 — LIVE SENSOR
    =========================================================================== */
-const SOURCE_WORDS = { edge_pi: "EDGE PI", mac_camera: "MAC CAM", file: "RECORDED" };
+/* edge_pi is RETIRED (2026-08-29) but stays in this map: records written before the
+   Pi left the rig still carry the kind, and an unlabelled badge on a historical record
+   reads as a bug in the console rather than as history. */
+const SOURCE_WORDS = { video_stream: "VIDEO", mac_camera: "MAC CAM",
+                       file: "RECORDED", edge_pi: "EDGE PI (RETIRED)" };
 
 function renderSensor() {
   const nodes = [...S.nodes.values()];
@@ -996,7 +1081,7 @@ function renderSensor() {
   for (const rec of S.records.values())
     if (rec.eo_contact)
       drawn.push([rec.eo_contact, rec.verdict?.label || "UNKNOWN", rec.record_id,
-                  isInjected(rec)]);
+                  isInjected(rec) || isSynthetic(rec)]);
   for (const c of S.loose.values())
     if (!drawn.some(d => d[0].contact_id === c.contact_id))
       drawn.push([c, null, null, String(c.frame_ref || "").startsWith("injected://")]);
@@ -1023,7 +1108,8 @@ function renderSensor() {
     t.setAttribute("y", Math.max(28, y0 - 11 - (li++ % 3) * 34));
     t.setAttribute("fill", colour); t.setAttribute("font-size", "26");
     t.setAttribute("font-weight", "800"); t.setAttribute("font-family", "ui-monospace,Menlo,monospace");
-    t.textContent = (inj ? "INJ " : "") + (label ? label + " " : "") + c.contact_id;
+    t.textContent = (inj ? "NOT CAMERA-OBSERVED " : "") + (label ? label + " " : "")
+                  + c.contact_id;
     g.appendChild(t);
     const lead = document.createElementNS(NS, "line");
     lead.setAttribute("x1", x0 + 1); lead.setAttribute("x2", x0 + 1);
@@ -1035,15 +1121,31 @@ function renderSensor() {
   }
 
   const anyInjected = [...S.records.values()].some(isInjected);
+  const anySynthetic = [...S.records.values()].some(isSynthetic);
   const chip = $("cInject");
-  chip.classList.toggle("on", anyInjected || !!S.injection);
+  chip.classList.toggle("on", anyInjected || anySynthetic || !!S.injection);
+  /* THREE STATES, AND THE THIRD IS THE ONE THAT WAS MISSING. An em-dash here used to
+     mean "nothing injected", which a viewer reads as "these are observations". It now
+     only ever appears when the scene really is camera-observed. */
   $("tInject").textContent = S.injection?.scenario
-    || (anyInjected ? injectedScenario([...S.records.values()].find(isInjected)) : "—");
+    ? "LIVE INJECTION · " + S.injection.scenario
+    : anyInjected ? injectedScenario([...S.records.values()].find(isInjected))
+    : anySynthetic ? "SYNTHETIC EO — no camera observed this scene"
+    : "none — contacts are camera-observed";
 
   $("sensorFoot").textContent = drawn.length
     ? `${drawn.length} detection${drawn.length === 1 ? "" : "s"} in frame · boxes are the `
       + `detector's output, projected at ${W}x${H}`
     : "no detections in frame";
+}
+
+let VIDEO_RETRY = null;
+
+/* Re-arm the check. Single-shot timer, cleared first, so a burst of img errors cannot
+   stack up a dozen pollers all racing to set img.src. */
+function retryVideo(ms) {
+  if (VIDEO_RETRY) clearTimeout(VIDEO_RETRY);
+  VIDEO_RETRY = setTimeout(() => { VIDEO_RETRY = null; initVideo(); }, ms);
 }
 
 async function initVideo() {
@@ -1072,20 +1174,52 @@ async function initVideo() {
     img.classList.add("hidden");
     $("frameEdge").classList.remove("hidden");
     no.innerHTML = "<strong>NO VIDEO SOURCE CONFIGURED</strong>"
-      + "The edge sensor posts contacts, it does not serve video. Detection boxes below "
-      + "are live and real; the imagery behind them is not available on this run.<br><br>"
-      + "<span class='hint'>start with --mjpeg-url &lt;mjpg-streamer url&gt; or --camera 0</span>";
+      + "No sensor node is publishing frames and this server was not given a video to "
+      + "decode. Detection boxes below are live and real; the imagery behind them is "
+      + "not available on this run.<br><br>"
+      + "<span class='hint'>python 03_src/main.py --video &lt;file|url&gt; --loop"
+      + "&nbsp;&nbsp;·&nbsp;&nbsp;--camera 0&nbsp;&nbsp;·&nbsp;&nbsp;"
+      + "server.py --mjpeg-url &lt;multipart feed&gt;</span>";
+    /* KEEP LOOKING. A node that has not published its first frame yet is
+       indistinguishable, at this instant, from no node at all — and on the --video
+       path the first of those is the normal case for the first second or two. */
+    retryVideo(3000);
     return;
   }
+
+  /* WHAT THE IMAGERY IS, STATED ON THE PICTURE ITSELF.
+     The boxes are an overlay: nothing in the geometry forces them to belong to the
+     frame underneath. When they do — a node published the frame it detected on — the
+     caveat stays out of the way. When they do not, the screen has to say so, because
+     an operator reading a box as a position on THIS frame is the single most damaging
+     thing this pane could cause them to believe. /health computes the sentence; the
+     console does not second-guess it. */
+  const sync = health?.source?.video_sync || "";
+  const vs = $("videoSync");
+  if (sync && !sync.startsWith("frame-synchronised")) {
+    vs.textContent = sync;
+    vs.classList.remove("hidden");
+    vs.classList.toggle("warn", sync.startsWith("UNRELATED"));
+  } else {
+    vs.classList.add("hidden");
+  }
+
   no.textContent = "";
   img.classList.remove("hidden");
   img.onerror = () => {
     img.classList.add("hidden");
+    $("videoSync").classList.add("hidden");
     no.innerHTML = "<strong>VIDEO SOURCE STOPPED</strong>"
       + "The stream was configured (" + src + ") and is not delivering frames. "
-      + "Detection boxes continue from the pipeline.";
+      + "Detection boxes continue from the pipeline.<br><br>"
+      + "<span class='hint'>re-checking every 3 s — a node that comes back "
+      + "re-attaches on its own</span>";
+    retryVideo(3000);
   };
-  img.src = "/stream";
+  /* Cache-bust. Reusing the same URL after a stream ended can be served from the
+     browser's copy of the dead response, which looks exactly like a source that is
+     still down. */
+  img.src = "/stream?t=" + Date.now();
 }
 </script>
 
@@ -1274,6 +1408,8 @@ function renderQueue() {
     ident.appendChild(badge(v.label, true));
     if (isInjected(rec))
       ident.appendChild(el("span", "badge inj", "injected · " + injectedScenario(rec)));
+    else if (isSynthetic(rec))
+      ident.appendChild(el("span", "badge inj", "synthetic · no camera"));
     if (v.defer_to_human) ident.appendChild(el("span", "badge defer", "defer to human"));
     if (p.scarce_asset_recommended) ident.appendChild(el("span", "badge rec", "send the boat"));
     li.appendChild(ident);
@@ -1367,6 +1503,8 @@ function renderEvidence() {
   head.appendChild(badge(v.label, true));
   if (isInjected(rec))
     head.appendChild(el("span", "badge inj", "injected · " + injectedScenario(rec)));
+  else if (isSynthetic(rec))
+    head.appendChild(el("span", "badge inj", "synthetic · no camera"));
   if (v.spoof_subtype) head.appendChild(el("span", "badge v-SPOOF", v.spoof_subtype + " spoof"));
   if (v.defer_to_human) head.appendChild(el("span", "badge defer", "defer to human"));
   const conf = el("div", "conf v-" + v.label);
@@ -1528,6 +1666,21 @@ function renderEvidence() {
       + "range and their uncertainties are the harness's; the attributes under "
       + "comparison were set deliberately. The label travels in frame_ref, so it is in "
       + "the exported case file too.");
+    li.style.color = "var(--unknown)";
+    li.style.fontWeight = "700";
+    ul.appendChild(li);
+  }
+  if (!isInjected(rec) && isSynthetic(rec)) {
+    /* Stated FIRST, above the real limitations, for the same reason the injected line
+       is: a projected contact that reads like a detection is the most misleading thing
+       this pane can present. It does NOT say which contact carries a planted fault --
+       that is in ground_truth.jsonl, which nothing in 03_src may read. */
+    const li = el("li", null,
+      "THIS CONTACT WAS NOT OBSERVED BY A CAMERA. It was forward-projected from the "
+      + "AIS claim through a declared camera pose and perturbed with a measurement-error "
+      + "model (04_demo/make_synthetic_eo.py). Its bearing, range, class and their "
+      + "uncertainties are the harness's. Any rate derived from this scene measures the "
+      + "decision logic against a model of a camera, never against the sea.");
     li.style.color = "var(--unknown)";
     li.style.fontWeight = "700";
     ul.appendChild(li);
@@ -1734,16 +1887,5 @@ boot();
 })();
 </script>
 
-<div id="attribBlock" style="padding:6px 12px;font-size:11px;line-height:1.5;
-     color:var(--dim,#8fa3b8);border-top:1px solid var(--border,#586b82)">
-  <!-- ATTRIBUTION BLOCK. CC-BY 4.0 attribution is a CONDITION OF USE, not a courtesy,
-       and it was recorded in three internal files while appearing on no surface a
-       reader ever sees. The plan was to satisfy it on a pitch slide; 05_pitch/ is
-       empty. It is discharged here instead, beside the map it applies to. -->
-  Map rendering: <a href="https://leafletjs.com/" style="color:inherit">Leaflet</a> 1.9.4
-  (BSD-2-Clause). &nbsp;·&nbsp; Coastline: © European Environment Agency, CC BY 4.0,
-  reprojected and buffered. &nbsp;·&nbsp; AIS: Danish Maritime Authority, act 596/2005 —
-  redistribution not addressed; identities pseudonymised on every outbound route.
-</div>
 </body>
 </html>

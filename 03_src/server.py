@@ -81,6 +81,7 @@ import asyncio
 import json
 import os
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -1296,25 +1297,34 @@ class ConsoleBackend:
 # ================================================================================
 # 3. THE VIDEO STREAM.
 #
-# HONEST STATEMENT OF WHAT THIS IS, BECAUSE THE BRIEF ASSUMED SOMETHING THAT IS NOT
-# TRUE OF THE CODE: 04_demo/pi_sensor.py serves NO video. It is a push client — it
-# opens the camera locally, runs background subtraction, and POSTs EoContact JSON with
-# urllib. There is no HTTP server on the Pi and no MJPEG endpoint to proxy.
+# REWRITTEN 2026-08-29 WHEN THE RASPBERRY PI LEFT THE RIG. The EO sensor is now a video
+# THIS MACHINE decodes — a file on disk, or a network stream off the internet — and the
+# console has to be able to show it. Four ways in, in order of how much they can be
+# trusted:
 #
-# Rather than invent one (CLAUDE.md: NEVER INVENT AN API), /stream does two real
-# things and refuses honestly when neither is configured:
-#
-#   --mjpeg-url  Straight passthrough of ANY multipart/x-mixed-replace source. That is
-#                the standard wire format of mjpg-streamer and motion, either of which
-#                runs on a Pi alongside pi_sensor.py without a line of new code. The
+#   RELAY        A sensor node POSTs the JPEG it computed its contacts from to
+#                /ingest/frame, and /stream hands that straight on. This is the only
+#                option where the imagery under the detection boxes is GUARANTEED to be
+#                the imagery the boxes came from — see _FrameRelay for why that is a
+#                correctness property and not a nicety. Preferred whenever available;
+#                it is chosen automatically while a node is publishing.
+#   --video      Decode a file path or a URL here (http/https/rtsp, and HLS .m3u8
+#                counts). Files are paced to their own frame rate and looped; live
+#                sources are neither. This is the source that replaced the Pi.
+#   --camera N   A lens on this machine. Same code path as --video: cv2.VideoCapture
+#                takes an int, a path or a URL and does not care which.
+#   --mjpeg-url  Straight passthrough of ANY multipart/x-mixed-replace source. The
 #                server does not parse the stream, so it cannot be wrong about it.
-#   --camera N   Encode the LOCAL camera with cv2 (measured present on the Mac,
-#                1080p PASS). This is the indoor D1/D2 path.
 #
-# Configured neither way it returns 503 with a stated reason. It NEVER returns a
+# Configured none of these it returns 503 with a stated reason. It NEVER returns a
 # placeholder or a frozen last frame: a still image on a watch screen is indistinguish-
 # able from a live one showing calm water, and that confusion is the whole failure mode
 # SensorNode.last_seen exists to prevent.
+#
+# ONE CAMERA, ONE CONSUMER. macOS will not usually open the built-in camera twice, so
+# --camera on the server AND a node on the same index is a contest one of them loses.
+# A file or a network URL has no such limit — which is a further reason the relay is
+# the right default and --video the right flag to reach for.
 # ================================================================================
 
 def _mjpeg_passthrough(url: str, *, chunk: int = 8192) -> Iterator[bytes]:
@@ -1345,39 +1355,236 @@ def _mjpeg_passthrough(url: str, *, chunk: int = 8192) -> Iterator[bytes]:
         return
 
 
-def _mjpeg_local_camera(index: int, *, quality: int = 80) -> Iterator[bytes]:
+def _mjpeg_part(payload: bytes) -> bytes:
+    """One multipart/x-mixed-replace part. One definition, so the two producers below
+    cannot disagree about the wire format."""
+    return (
+        f"--{MJPEG_BOUNDARY}\r\n"
+        f"Content-Type: image/jpeg\r\n"
+        f"Content-Length: {len(payload)}\r\n\r\n"
+    ).encode("ascii") + payload + b"\r\n"
+
+
+def parse_video_source(spec: "str | int | None") -> "str | int | None":
     """
-    Encode the local camera as MJPEG.
+    '0' -> 0 (camera index).  Anything else stays a string: a path or a URL.
+
+    ONE PARSER, called by every entry point, because the alternative is main.py and
+    server.py each deciding what "0" means and disagreeing on the one run where it
+    matters. cv2.VideoCapture takes an int OR a str and treats a file path and a URL
+    identically, which is why a camera, a clip and an internet stream need one code
+    path here and not three.
+    """
+    if spec is None:
+        return None
+    if isinstance(spec, int):
+        return spec
+    s = str(spec).strip()
+    if not s:
+        return None
+    return int(s) if s.isdigit() else s
+
+
+def _is_replayable_file(source: "str | int") -> bool:
+    """A local file can be paced and looped. A camera or a network stream cannot be
+    either: there is no 'again' and no native frame rate to honour."""
+    return isinstance(source, str) and Path(source).expanduser().exists()
+
+
+def _mjpeg_decode(source: "str | int", *, quality: int = 80,
+                  loop: bool = True, live_timeout_s: float = 10.0,
+                  yield_to=None) -> Iterator[bytes]:
+    """
+    Decode ANY cv2 source and serve it as MJPEG: camera index, file path, or URL.
 
     cv2 is imported INSIDE the function, deliberately. A top-level import would make
     the whole shore station refuse to start on any machine without opencv — including
     a teammate's laptop that only needs the console — for a feature that is optional.
     The same lazy-import discipline lane A enforces on the geo stack, for the same
     reason: reading the picture must not require the ability to produce it.
+
+    THREE BEHAVIOURS THAT ARE NOT OBVIOUS AND ARE EACH THERE FOR A MEASURED REASON.
+
+    PACING (files only). A file read as fast as the loop can turn plays a 30 s clip in
+    about two seconds and then ends. The browser shows a smear and then a dead frame.
+    So a file is paced to its own CAP_PROP_FPS. A camera and a network stream are NOT
+    paced: they already arrive at their own rate, and sleeping on top of that only adds
+    latency to a live picture.
+
+    LOOPING (files only). The demo runs longer than the clip. At EOF the position is
+    rewound; if the container refuses to seek, the capture is reopened.
+
+    ENDING RATHER THAN FREEZING (live sources). If a live source stops delivering, this
+    generator RETURNS after live_timeout_s and the console reports the stream stopped.
+    It never re-yields the last frame. An MJPEG <img> keeps painting the final part it
+    received, so a producer that quietly stops leaves a still image on a watch screen —
+    and a still of calm water is indistinguishable from a live view of calm water. That
+    confusion is the whole reason SensorNode.last_seen exists; the video pane is not
+    allowed to reintroduce it.
     """
     import cv2  # noqa: PLC0415 — see docstring
 
-    cap = cv2.VideoCapture(index)
+    # yield_to() is checked once per frame. When it goes true a better source has
+    # appeared — in practice a sensor node that has started publishing the frames it
+    # detected on — and this generator RETURNS so the caller can switch to it inside the
+    # same HTTP response. Without the hand-off the browser would sit on an
+    # unsynchronised decode for the rest of the session and only pick up the relay if
+    # someone reloaded the page.
+    replayable = _is_replayable_file(source)
+    cap = cv2.VideoCapture(source)
     if not cap.isOpened():
-        print(f"[server] /stream: camera {index} would not open", file=sys.stderr)
+        print(f"[server] /stream: source {source!r} would not open. A file path must "
+              f"exist; a URL must be one ffmpeg can read (http/https/rtsp, and an "
+              f"HLS .m3u8 counts).", file=sys.stderr)
         return
+
+    # Ask for the shallowest buffer the backend will give us. On a live source a deep
+    # buffer means the operator is watching the past, and a bearing computed from a
+    # frame thirty seconds old is a wrong bearing, not a late one.
+    try:
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    except Exception:                                      # noqa: BLE001
+        pass
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+    period = (1.0 / fps) if (replayable and 0.0 < fps <= 120.0) else 0.0
+    next_at = time.monotonic()
+    last_frame_at = time.monotonic()
+
     try:
         while True:
             ok, frame = cap.read()
+
             if not ok:
+                if replayable and loop:
+                    # Rewind. Reopen if the container will not seek — some MP4s and
+                    # most transport streams will not.
+                    if not cap.set(cv2.CAP_PROP_POS_FRAMES, 0):
+                        cap.release()
+                        cap = cv2.VideoCapture(source)
+                        if not cap.isOpened():
+                            return
+                    continue
+                if replayable:
+                    return                       # a clip that was asked not to loop
+                # A live source hiccuped. Reconnect, but only for a bounded time.
+                if time.monotonic() - last_frame_at > live_timeout_s:
+                    print(f"[server] /stream: {source!r} delivered no frame for "
+                          f"{live_timeout_s:.0f}s — ending the stream rather than "
+                          f"freezing the last one.", file=sys.stderr)
+                    return
+                time.sleep(0.5)
+                cap.release()
+                cap = cv2.VideoCapture(source)
+                continue
+
+            last_frame_at = time.monotonic()
+            if yield_to is not None and yield_to():
                 return
             ok, buf = cv2.imencode(".jpg", frame,
                                    [int(cv2.IMWRITE_JPEG_QUALITY), quality])
             if not ok:
                 continue
-            payload = buf.tobytes()
-            yield (
-                f"--{MJPEG_BOUNDARY}\r\n"
-                f"Content-Type: image/jpeg\r\n"
-                f"Content-Length: {len(payload)}\r\n\r\n"
-            ).encode("ascii") + payload + b"\r\n"
+            yield _mjpeg_part(buf.tobytes())
+
+            if period:
+                next_at += period
+                slack = next_at - time.monotonic()
+                if slack > 0:
+                    time.sleep(slack)
+                else:
+                    next_at = time.monotonic()   # fell behind; do not accumulate debt
     finally:
         cap.release()
+
+
+class _FrameRelay:
+    """
+    The latest JPEG a sensor node published, and nothing else.
+
+    WHY THIS EXISTS, AND IT IS A CORRECTNESS FIX RATHER THAN A FEATURE.
+
+    OBSERVED  — the console draws its detection boxes as an SVG overlay ON TOP of
+                /stream (index.html, renderSensor: "boxes are the detector's output").
+    CLAIMED   — that the box and the hull under it are the same observation.
+    THE MISMATCH — when the server decodes the video AND the node decodes the same
+                video separately, there are two decoders holding two independent
+                positions in one file. The boxes come from frame N and are painted over
+                frame M, and on a looping clip N and M drift apart without bound.
+    WHY IT MATTERS — a box drawn over the wrong frame is a watch screen asserting a
+                vessel is somewhere it is not. That is not a rendering defect; it is the
+                tool making a false observation, and it would survive every functional
+                test because both halves work perfectly on their own.
+    THE FIX   — ONE decoder. The node that computed the contacts publishes the frame it
+                computed them FROM, and the server relays that. Imagery and boxes are
+                then the same observation with the same timestamp.
+    WHAT WOULD CHANGE THE ANSWER — a genuinely live source (a lens, or a broadcast
+                stream both ends open independently) is close enough in wall-clock time
+                that the drift is sub-second. The relay is still preferred there; the
+                unbounded-drift argument is specific to seekable files.
+
+    NEVER SERVES A STALE FRAME. If the node stops publishing, frames() RETURNS and the
+    console reports the stream as stopped. See _mjpeg_decode on why a frozen frame is
+    worse than no frame.
+    """
+
+    def __init__(self, stale_after_s: float = 5.0) -> None:
+        self.stale_after_s = stale_after_s
+        self._jpeg: bytes | None = None
+        self._seq = 0
+        self._at = 0.0
+        self._node_id: str | None = None
+        self._frame_ref: str | None = None
+        self._cv = threading.Condition()
+
+    def publish(self, jpeg: bytes, *, node_id: str | None = None,
+                frame_ref: str | None = None) -> int:
+        with self._cv:
+            self._jpeg = jpeg
+            self._seq += 1
+            self._at = time.monotonic()
+            self._node_id = node_id
+            self._frame_ref = frame_ref
+            self._cv.notify_all()
+            return self._seq
+
+    def fresh(self) -> bool:
+        with self._cv:
+            return (self._jpeg is not None
+                    and (time.monotonic() - self._at) <= self.stale_after_s)
+
+    def status(self) -> dict[str, Any]:
+        with self._cv:
+            age = (time.monotonic() - self._at) if self._jpeg is not None else None
+            return {
+                "frames_published": self._seq,
+                "node_id": self._node_id,
+                "frame_ref": self._frame_ref,
+                "age_s": round(age, 2) if age is not None else None,
+                "fresh": self._jpeg is not None and age is not None
+                         and age <= self.stale_after_s,
+            }
+
+    def frames(self) -> Iterator[bytes]:
+        """Yield each newly published frame. Blocks between them, in a threadpool."""
+        sent = -1
+        while True:
+            with self._cv:
+                if self._seq == sent or self._jpeg is None:
+                    # Wake at the staleness deadline even if nothing arrives, so the
+                    # "publisher stopped" branch below is reachable.
+                    self._cv.wait(timeout=self.stale_after_s)
+                if self._jpeg is None:
+                    return
+                if (time.monotonic() - self._at) > self.stale_after_s:
+                    print("[server] /stream: the node stopped publishing frames — "
+                          "ending the stream rather than freezing the last one.",
+                          file=sys.stderr)
+                    return
+                if self._seq == sent:
+                    continue
+                sent, payload = self._seq, self._jpeg
+            yield _mjpeg_part(payload)
 
 
 # ================================================================================
@@ -1392,6 +1599,8 @@ def create_app(
     mjpeg_url: str | None,
     camera_index: int | None,
     allow_real_identities: bool,
+    video_source: "str | int | None" = None,
+    frame_stale_after_s: float = 5.0,
     node_stale_after_s: float,
     initial_source: str = DEFAULT_SOURCE,
     startup_tasks: "Sequence[Any]" = (),
@@ -1412,6 +1621,95 @@ def create_app(
         FileResponse, JSONResponse, PlainTextResponse, StreamingResponse)
     from fastapi.staticfiles import StaticFiles
     from starlette.websockets import WebSocketDisconnect
+
+    # ---- MAKE FASTAPI'S OWN TYPES RESOLVABLE FROM MODULE SCOPE ------------------
+    # `from __future__ import annotations` makes every annotation in this file a
+    # STRING, and FastAPI resolves those strings against this MODULE's globals. The
+    # fastapi imports above are deliberately local to this function, so `Request` and
+    # `WebSocket` were not in module globals and did not resolve — FastAPI then treated
+    # `request: Request` as a missing QUERY PARAMETER and answered 422 to every POST on
+    # /ingest/contacts, /api/contacts and /ingest/frame. The sensor node could never
+    # deliver an observation. Two lines fix it without giving up the lazy import: the
+    # names are published only here, inside the function that already requires fastapi,
+    # so a teammate without the web stack can still import this module for the console.
+    globals()["Request"] = Request
+    globals()["WebSocket"] = WebSocket
+
+    # ONE video source value, resolved once, here.
+    #
+    # `camera_index` predates video sources and callers still pass it. Rather than
+    # carry two settings that can disagree — and they would, on exactly the run where
+    # someone passed both — it is folded into `video_source` at the boundary. After
+    # this line there is a single value and a single spelling for "what /stream
+    # decodes when no node is publishing frames".
+    video_source = parse_video_source(
+        video_source if video_source is not None else camera_index)
+
+    # The relay is always constructed, never conditionally. A node may start publishing
+    # at any point in the run; building the relay only when it was configured in
+    # advance would mean the one thing an operator does mid-demo (start a sensor)
+    # silently could not take effect.
+    relay = _FrameRelay(stale_after_s=frame_stale_after_s)
+
+    def _video_description() -> str:
+        """
+        What /health tells the console. The exact string "none configured" is a
+        CONTRACT: index.html's initVideo() compares against it to decide whether a 503
+        on /stream is a configuration statement or a fault, and reports the wrong one
+        if this drifts.
+        """
+        if relay.fresh():
+            st = relay.status()
+            return f"relayed from node {st['node_id'] or 'unknown'}"
+        if mjpeg_url:
+            return "passthrough"
+        if video_source is not None:
+            return (f"decoding camera {video_source}" if isinstance(video_source, int)
+                    else f"decoding {video_source}")
+        return "none configured"
+
+    def _video_sync() -> str:
+        """
+        Whether the imagery under the detection boxes is the imagery the boxes were
+        computed from. Published because the console overlays one on the other, and an
+        operator is entitled to know when the two are only approximately the same
+        picture. See _FrameRelay for why this distinction is not pedantry.
+        """
+        have_imagery = relay.fresh() or video_source is not None or bool(mjpeg_url)
+        if not have_imagery:
+            return "no imagery"
+
+        # THE WORST CASE FIRST, BECAUSE IT IS THE ONE THAT LIES QUIETLY.
+        # The video pane and the promoted contacts are independent: /stream shows
+        # whatever imagery exists, while source_switch decides whose CONTACTS reach the
+        # picture. Run a clip in the pane while RECORDED is the authority and the
+        # console draws boxes from the recorded scene on top of unrelated imagery —
+        # every box in the wrong place, nothing on screen saying so, and both halves
+        # working exactly as designed. Said out loud here so the console can say it too.
+        if backend.source.active == "RECORDED":
+            # ...unless the imagery IS this scene's own rendering. make_scene_video.py
+            # writes scene.mp4 INTO the scene directory and draws every hull at the
+            # exact bbox the scene's contact carries, so the boxes do belong to the
+            # frame beneath them. Checked by path rather than by a flag: a flag can be
+            # passed for a video that is nothing of the kind, and this claim is one the
+            # operator will trust.
+            try:
+                own = (video_source is not None
+                       and isinstance(video_source, str)
+                       and Path(video_source).resolve().parent == scene_dir.resolve())
+            except OSError:
+                own = False
+            if own:
+                return ("scene rendering: this imagery was rendered from the very "
+                        "contacts drawn over it. Synthetic — no camera observed it.")
+            return ("UNRELATED IMAGERY: the contacts on screen come from the RECORDED "
+                    "scene, not from this video. The boxes do NOT belong to the frame "
+                    "beneath them. Switch the source to VIDEO_STREAM to make the "
+                    "picture one observation.")
+        if relay.fresh():
+            return "frame-synchronised: the node published the frame it detected on"
+        return ("reference imagery: decoded independently of the detector, so the "
+                "boxes are NOT guaranteed to belong to the frame beneath them")
 
     backend = ConsoleBackend(scene_dir, audit_path=audit_path,
                              node_stale_after_s=node_stale_after_s,
@@ -1565,8 +1863,14 @@ def create_app(
         node_id = str(meta.get("node_id")
                       or request.query_params.get("node_id")
                       or "edge-unknown")
-        kind: SensorKind = meta.get("kind") or "edge_pi"
-        if kind not in ("edge_pi", "mac_camera", "file"):
+        # DEFAULT CHANGED 2026-08-29, and it is load-bearing rather than cosmetic.
+        # A node that does not declare its kind used to be ASSUMED to be the Pi. With
+        # EDGE_PI retired from the selectable sources, that assumption would make an
+        # undeclared node permanently unpromotable: it POSTs 200 OK for ever, both ends
+        # look healthy, and nothing it sees ever reaches the picture. The default is now
+        # the kind the rig actually runs.
+        kind: SensorKind = meta.get("kind") or "video_stream"
+        if kind not in ("edge_pi", "mac_camera", "video_stream", "file"):
             raise HTTPException(400, f"unknown sensor kind {kind!r}")
         fps = meta.get("measured_fps")
         fps_f = float(fps) if fps is not None else None
@@ -1598,21 +1902,105 @@ def create_app(
         """pi_sensor.py's hardcoded default path. Same handler, no second behaviour."""
         return await _ingest(request)
 
+    # ---------------------------------------------------- POST /ingest/frame
+    @app.post("/ingest/frame")
+    async def ingest_frame(request: Request,
+                           node_id: str | None = Query(default=None),
+                           frame_ref: str | None = Query(default=None)):
+        """
+        The sensor node publishes the JPEG it computed its contacts from.
+
+        RAW BYTES, NOT MULTIPART, NOT BASE64 IN JSON. The node is deliberately a
+        dependency-light thing posting with urllib; base64 would inflate every frame by
+        a third for no gain, and a multipart encoder is a library the node does not
+        have. Content-Type is image/jpeg and the body is the file.
+
+        Bounded by construction: the relay holds exactly ONE frame. There is no queue to
+        grow, so a fast node cannot exhaust memory on a slow console, and a viewer that
+        falls behind sees the newest frame rather than an ever-older one.
+        """
+        data = await request.body()
+        if not data:
+            raise HTTPException(400, "empty body: POST the JPEG bytes as the body")
+        # Cheap sanity check rather than a decode. The server has no opinion about the
+        # image, but a node posting JSON to this route by mistake should be told so
+        # here, not by a browser rendering a broken image on stage.
+        if not data.startswith(b"\xff\xd8"):
+            raise HTTPException(400, "body is not a JPEG (no SOI marker). This route "
+                                     "takes raw image/jpeg bytes.")
+        seq = relay.publish(data, node_id=node_id, frame_ref=frame_ref)
+        return {"ok": True, "frame_seq": seq, "bytes": len(data)}
+
     # ------------------------------------------------------------ GET /stream
     @app.get("/stream")
     async def stream():
-        if mjpeg_url:
+        """
+        PRECEDENCE, AND THE ORDER IS THE ARGUMENT.
+
+        1. RELAY, whenever a node is currently publishing. It is the only source whose
+           imagery is guaranteed to be the imagery the detection boxes were computed
+           from, so it wins over anything this server could decode for itself.
+        2. --mjpeg-url passthrough.
+        3. --video / --camera decoded here.
+        4. 503, stating which flag would fix it.
+
+        The precedence is evaluated per REQUEST, not once at startup: a node started
+        halfway through a run takes over the pane on the browser's next reconnect, and
+        /health says which source is live at any moment.
+        """
+        def _frames() -> Iterator[bytes]:
+            """
+            One response, whichever source is currently best.
+
+            The precedence is re-evaluated CONTINUOUSLY rather than once at connect
+            time. A node that starts thirty seconds into a run takes the pane over
+            without the operator reloading anything; a node that dies hands the pane
+            back to the server's own decode instead of leaving a dead pane. Both
+            transitions happen inside the same <img>, which is the only place the
+            operator is looking.
+            """
+            empty_rounds = 0
+            while True:
+                if relay.fresh():
+                    empty_rounds = 0
+                    yield from relay.frames()      # returns when the node goes quiet
+                    continue                       # ...then fall through and decode
+                if mjpeg_url:
+                    yield from _mjpeg_passthrough(mjpeg_url)
+                    return                         # a passthrough that ends, ends
+                if video_source is None:
+                    return
+                served = 0
+                for part in _mjpeg_decode(video_source, yield_to=relay.fresh):
+                    served += 1
+                    yield part
+                if served:
+                    empty_rounds = 0
+                    continue
+                # Produced nothing: the source is unopenable, not merely quiet. Two
+                # rounds, then stop, so a bad path cannot become a hot reopen loop that
+                # burns a core for the rest of the demo.
+                empty_rounds += 1
+                if empty_rounds >= 2:
+                    print(f"[server] /stream: {video_source!r} produced no frames "
+                          f"twice — giving up rather than reopening in a loop.",
+                          file=sys.stderr)
+                    return
+                time.sleep(0.5)
+
+        if relay.fresh() or mjpeg_url or video_source is not None:
             return StreamingResponse(
-                _mjpeg_passthrough(mjpeg_url),
-                media_type=f"multipart/x-mixed-replace; boundary={MJPEG_BOUNDARY}")
-        if camera_index is not None:
-            return StreamingResponse(
-                _mjpeg_local_camera(camera_index),
+                _frames(),
                 media_type=f"multipart/x-mixed-replace; boundary={MJPEG_BOUNDARY}")
         return PlainTextResponse(
-            "No video source configured. pi_sensor.py posts contacts, it does not "
-            "serve video. Start the server with --mjpeg-url <url of an "
-            "mjpg-streamer/motion feed> or --camera <index>.",
+            "No video source configured, and no sensor node is publishing frames.\n"
+            "Give the shore station something to show, in order of preference:\n"
+            "  --video <file|url>   decode a clip or a network stream here, and run\n"
+            "                       the sensor node on the SAME source so the boxes\n"
+            "                       and the imagery agree;\n"
+            "  --camera <index>     a lens on this machine;\n"
+            "  --mjpeg-url <url>    relay an existing multipart/x-mixed-replace feed.\n"
+            "A node started with --publish-frames takes the pane over automatically.",
             status_code=503)
 
     # ------------------------------------------------------- GET/POST /source
@@ -1624,7 +2012,7 @@ def create_app(
     @app.post("/source")
     async def post_source(body: dict = Body(...)):
         """
-        Switch the live source. EDGE_PI | MAC_CAMERA | RECORDED.
+        Switch the live source. VIDEO_STREAM | MAC_CAMERA | RECORDED.
 
         Does not restart the server and does not clear the queue — the evidence records,
         the operator audit trail and the event sequence all survive, and the response
@@ -1638,7 +2026,8 @@ def create_app(
         """
         target = body.get("source") or body.get("to")
         if not target:
-            raise HTTPException(400, "body needs {'source': 'EDGE_PI|MAC_CAMERA|RECORDED'}")
+            raise HTTPException(
+                400, "body needs {'source': 'VIDEO_STREAM|MAC_CAMERA|RECORDED'}")
         try:
             normalise_source(target)
         except ValueError as exc:
@@ -1757,9 +2146,9 @@ def create_app(
             "source": {
                 "mode": state.get("mode"),
                 "scene": str(backend.scene_dir),
-                "video": ("passthrough" if mjpeg_url else
-                          f"local camera {camera_index}" if camera_index is not None
-                          else "none configured"),
+                "video": _video_description(),
+                "video_sync": _video_sync(),
+                "frame_relay": relay.status(),
                 "last_update": state.get("last_update"),
             },
             "counts": state.get("counts", {}),
@@ -1899,7 +2288,14 @@ def main(argv: list[str] | None = None) -> int:
                         "serves no video.")
     p.add_argument("--camera", type=int, default=None,
                    help="Local camera index to encode on /stream when no --mjpeg-url "
-                        "is given.")
+                        "is given. Shorthand for --video <index>.")
+    p.add_argument("--video", default=None,
+                   help="EO SOURCE THAT REPLACED THE PI. A video file on disk, or a "
+                        "network stream URL (http/https/rtsp; an HLS .m3u8 counts), or "
+                        "a bare camera index. Files are paced to their own frame rate "
+                        "and looped so the clip outlasts the pitch. Run the sensor "
+                        "node on the SAME source with --publish-frames so the boxes "
+                        "and the imagery are one observation.")
     p.add_argument("--node-stale-after", type=float, default=NODE_STALE_AFTER_S,
                    help="Seconds of silence after which a node is believed offline. "
                         "This is the online/offline policy threshold contracts.py "
@@ -1919,12 +2315,12 @@ def main(argv: list[str] | None = None) -> int:
     _require_web_stack()
     import uvicorn  # noqa: PLC0415 — only after the guard has produced a good message
 
-    if args.mjpeg_url and args.camera is not None:
-        # Refuse rather than silently prefer one. Two configured video sources means
-        # the operator does not know which one they are watching, and "which camera is
-        # this" is a question a case file has to answer.
-        raise SystemExit("--mjpeg-url and --camera are mutually exclusive: pick the "
-                         "source the evidence should name.")
+    # Refuse rather than silently prefer one. Two configured video sources means the
+    # operator does not know which one they are watching, and "which camera is this" is
+    # a question a case file has to be able to answer.
+    if sum(x is not None for x in (args.mjpeg_url, args.camera, args.video)) > 1:
+        raise SystemExit("--mjpeg-url, --camera and --video are mutually exclusive: "
+                         "pick the source the evidence should name.")
 
     app = create_app(
         scene_dir=args.scene,
@@ -1932,6 +2328,7 @@ def main(argv: list[str] | None = None) -> int:
         audit_path=args.audit,
         mjpeg_url=args.mjpeg_url,
         camera_index=args.camera,
+        video_source=args.video,
         allow_real_identities=args.allow_real_identities,
         node_stale_after_s=args.node_stale_after,
         initial_source=args.initial_source,
@@ -1946,18 +2343,23 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  live source : {args.initial_source}   "
           f"(switch: POST /source {{'source':'MAC_CAMERA'}})")
     print(f"  node timeout: {args.node_stale_after:.0f} s of silence -> offline")
-    print(f"  edge node   : POST http://{args.host}:{args.port}/api/contacts")
-    print(f"                 (alias of /ingest/contacts — pi_sensor.py's default)")
+    print(f"  sensor node : POST http://{args.host}:{args.port}/api/contacts")
+    print(f"                 (alias of /ingest/contacts — the node's default)")
+    print(f"  frames      : POST http://{args.host}:{args.port}/ingest/frame")
+    print(f"                 (raw image/jpeg; a node publishing here takes /stream)")
     print(f"  video       : " + (f"relay {args.mjpeg_url}" if args.mjpeg_url
+                                 else f"decoding {args.video}" if args.video
                                  else f"local camera {args.camera}"
                                  if args.camera is not None
-                                 else "none configured -> /stream returns 503"))
+                                 else "none configured -> /stream returns 503 until a "
+                                      "node publishes frames"))
     print(f"  identities  : " + ("REAL PERMITTED on /evidence?allow_real=1"
                                  if args.allow_real_identities
                                  else "pseudonymised on every outbound route"))
     if args.host == "127.0.0.1":
-        print("  NOTE: bound to localhost, so the Pi cannot reach it. Use "
-              "--host 0.0.0.0 for the live path.")
+        print("  NOTE: bound to localhost. Fine now that the sensor node runs on "
+              "this machine; use --host 0.0.0.0 only if a node posts from another "
+              "device on the network.")
     print("  ctrl-c to stop")
 
     # log_level="warning": uvicorn's default access log prints a line per request, and

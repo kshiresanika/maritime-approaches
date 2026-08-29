@@ -1,14 +1,33 @@
 """
 pi_sensor.py — the coastal sensor node. Classical CV. NO NEURAL NETWORK.
 
-WHAT THIS IS
-A Raspberry Pi with a camera module, standing in for a camera at the water's edge. It
-detects hulls, computes a true bearing and a range for each, and POSTs them to the shore
-station as EoContact-shaped JSON. It is the physical embodiment of the claimed/observed
-wall: THIS PROCESS HAS NO ACCESS TO AIS AT ALL. It has never been told an MMSI, has
-nowhere to put one, and could not leak an identity into an observation if it tried.
-When someone asks how you know the detector is not peeking at the AIS, you point at the
-Pi and say it has no AIS connection.
+THE FILENAME IS NOW HISTORICAL. Renaming it mid-event would touch main.py, server.py,
+the handoffs, the benchmark and the demo script for no behavioural gain, so the name
+stays and this paragraph carries the correction: there is no Raspberry Pi. Rename it to
+sensor_node.py after the event, in one commit, when nothing depends on the clock.
+
+WHAT THIS IS (UPDATED 2026-08-29 — THE Pi LEFT THE RIG)
+A coastal sensor node standing in for a camera at the water's edge. It reads frames from
+whatever it is pointed at — a lens on this machine, a video file on disk, or a network
+stream off the internet — detects hulls, computes a true bearing and a range for each,
+and POSTs them to the shore station as EoContact-shaped JSON.
+
+WHAT DID NOT CHANGE WHEN THE HARDWARE DID, AND IT IS THE PART THAT MATTERS: this is
+still the physical embodiment of the claimed/observed wall. THIS PROCESS HAS NO ACCESS
+TO AIS AT ALL. It has never been told an MMSI, has nowhere to put one, and could not
+leak an identity into an observation if it tried. That argument was never a property of
+the Pi — it is a property of this process's imports and its network calls, both of which
+are still one-way. When someone asks how you know the detector is not peeking at the
+AIS, you show them that this file imports cv2, numpy and urllib and nothing else, and
+that its only outbound route is a POST.
+
+WHAT DID CHANGE, STATED PLAINLY BECAUSE IT BOUNDS THE CLAIM
+A recorded clip or an internet stream is EVIDENCE OF THE PIPELINE, not evidence of the
+sea. The bearings and ranges below are computed from a pose that describes a real camera
+at a real height; point this at a video shot from a different camera and the geometry is
+arithmetic performed on an assumption. Say so when demonstrating it. The honest sentence
+is "this is the detector and the fusion running on real imagery at demo scale", never
+"this is our sensor watching the Elbe".
 
 WHY CLASSICAL AND NOT YOLO — THREE REASONS, IN ORDER OF IMPORTANCE
 
@@ -51,8 +70,17 @@ DEPENDENCIES: opencv-python and numpy. Nothing else. No pydantic, no torch, no
 ultralytics. Validation happens on the shore station, at the boundary where the contract
 is consumed.
 
-    python3 04_demo/pi_sensor.py --post http://<mac-ip>:8000/api/contacts \
-        --pose 04_demo/camera_pose_TABLETOP.json --scale 20
+    # a clip on disk, publishing the frames it detects on (the demo path)
+    python3 04_demo/pi_sensor.py --source 02_data/clips/approach.mp4 --loop \
+        --pose 04_demo/camera_pose_TABLETOP.json --scale 20 \
+        --post http://127.0.0.1:8000/api/contacts \
+        --publish-frames http://127.0.0.1:8000/ingest/frame
+
+    # a network stream (HLS/RTSP/HTTP) instead — same command, different --source
+    python3 04_demo/pi_sensor.py --source "https://example.org/live/stream.m3u8" ...
+
+    # a lens on this machine
+    python3 04_demo/pi_sensor.py --source 0 ...
 """
 
 from __future__ import annotations
@@ -63,8 +91,10 @@ import math
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -362,8 +392,22 @@ def to_contact(det: dict, *, horizon_y: float, pose: dict, frame_w: int, frame_h
     }
 
 
-def post(url: str, contacts: list[dict]) -> None:
-    body = json.dumps({"contacts": contacts}).encode("utf-8")
+def post(url: str, contacts: list[dict], *, node_id: str = "sensor-01",
+         kind: str = "video_stream", measured_fps: float | None = None) -> None:
+    """
+    POST observations to the shore station.
+
+    node_id AND kind ARE NOW SENT, AND THE OMISSION USED TO BE LOAD-BEARING. The server
+    defaults an undeclared node's kind, and source_switch only promotes contacts whose
+    kind IS THE ACTIVE SOURCE. A node that does not say what it is therefore depends on
+    the server guessing the same thing the operator selected — and when the Pi was
+    retired from the selectable sources, the old guess ('edge_pi') became a kind that
+    could never be promoted. The node would have POSTed 200 OK for ever, both ends
+    reporting healthy, and nothing it saw would have reached the picture. Declaring the
+    kind removes the guess.
+    """
+    body = json.dumps({"contacts": contacts, "node_id": node_id, "kind": kind,
+                       "measured_fps": measured_fps}).encode("utf-8")
     req = urllib.request.Request(url, data=body,
                                  headers={"Content-Type": "application/json"})
     try:
@@ -378,12 +422,106 @@ def post(url: str, contacts: list[dict]) -> None:
         print(f"post failed: {type(e).__name__}: {e}", file=sys.stderr)
 
 
+def publish_frame(url: str, frame, *, node_id: str, frame_ref: str,
+                  quality: int = 70) -> None:
+    """
+    Send the shore station the JPEG THIS DETECTOR JUST RAN ON.
+
+    WHY THE NODE PUBLISHES THE FRAME INSTEAD OF THE SERVER OPENING THE VIDEO ITSELF:
+    the console draws its detection boxes as an overlay on top of /stream. Two processes
+    decoding the same file hold two independent positions in it, so the boxes come from
+    frame N and are painted over frame M, and on a looping clip the two drift apart
+    without bound. The operator then sees a box asserting a hull is somewhere it is not.
+    Publishing the frame the detector used makes the imagery and the boxes one
+    observation with one timestamp. server.py's _FrameRelay carries the same argument
+    from the other end.
+
+    RAW BYTES, NOT BASE64 IN JSON: a third more bandwidth per frame for nothing. Errors
+    are printed and swallowed — a failure to publish IMAGERY must never stop the node
+    posting CONTACTS, because the contacts are the evidence and the picture is the
+    illustration.
+    """
+    ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+    if not ok:
+        return
+    q = urllib.parse.urlencode({"node_id": node_id, "frame_ref": frame_ref})
+    req = urllib.request.Request(f"{url}?{q}", data=buf.tobytes(),
+                                 headers={"Content-Type": "image/jpeg"})
+    try:
+        with urllib.request.urlopen(req, timeout=2.0) as r:
+            r.read()
+    except Exception as e:                                 # noqa: BLE001
+        print(f"frame publish failed: {type(e).__name__}: {e}", file=sys.stderr)
+
+
+def open_source(spec: str):
+    """
+    Open a camera index, a file path or a URL. cv2 treats all three the same, which is
+    why there is one function here and not three.
+
+    Returns (capture, source, is_file). `is_file` decides two behaviours that are wrong
+    for a live source and necessary for a recorded one: pacing to the native frame rate,
+    and rewinding at the end.
+    """
+    src: int | str = int(spec) if spec.isdigit() else spec
+    is_file = isinstance(src, str) and Path(src).expanduser().exists()
+    if is_file:
+        src = str(Path(str(src)).expanduser())
+    cap = cv2.VideoCapture(src)
+    try:
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)   # live sources: watch now, not the past
+    except Exception:                                      # noqa: BLE001
+        pass
+    return cap, src, is_file
+
+
+def frame_scheme(src, is_file: bool) -> str:
+    """
+    The provenance prefix that goes into every EoContact's frame_ref.
+
+    It used to be 'pi://' unconditionally. That is now a false statement about where an
+    observation came from, and frame_ref is a CASE FILE FIELD: criterion 4 asks which
+    vessel on what track from what sensor, and a record that says a Raspberry Pi
+    observed something a video file showed is exactly the kind of unattributable claim
+    the evidence layer exists to prevent.
+    """
+    if isinstance(src, int):
+        return "cam"
+    if is_file:
+        return "file"
+    return "net"
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Classical EO sensor node. No AI.")
     p.add_argument("--pose", required=True, help="camera pose JSON")
     p.add_argument("--post", default=None, help="shore station /api/contacts URL")
     p.add_argument("--out", default=None, help="also append contacts to this JSONL")
-    p.add_argument("--source", default="0", help="camera index, or a video file path")
+    p.add_argument("--source", "--camera", dest="source", default="0",
+                   help="THE EO SOURCE. A camera index (0), a video file path, or a "
+                        "network stream URL (http/https/rtsp; an HLS .m3u8 counts). "
+                        "--camera is accepted as an alias because main.py and a year "
+                        "of muscle memory both spell it that way; one dest, so the two "
+                        "spellings cannot diverge.")
+    p.add_argument("--loop", action="store_true",
+                   help="Rewind a video file at the end. The demo outlasts the clip; "
+                        "without this the node exits mid-pitch and the console "
+                        "correctly reports a dead sensor.")
+    p.add_argument("--publish-frames", default=None,
+                   help="Shore station /ingest/frame URL. Sends the JPEG this detector "
+                        "ran on, so the console's boxes and imagery are ONE "
+                        "observation. Strongly preferred over pointing the server at "
+                        "the same video with --video: see publish_frame().")
+    p.add_argument("--publish-fps", type=float, default=8.0,
+                   help="Cap on published frames per second. The picture is an "
+                        "illustration of the evidence, not the evidence; 8 is plenty "
+                        "and leaves the CPU to the detector.")
+    p.add_argument("--node-id", default="sensor-01",
+                   help="Provenance. Appears on every contact and in the case file.")
+    p.add_argument("--pace", action="store_true", default=None,
+                   help="Play a video file at its own frame rate. Default ON for a "
+                        "file (a clip read flat out is over in seconds), OFF for a "
+                        "camera or a network stream (already arriving at their rate).")
     p.add_argument("--width", type=int, default=640)
     p.add_argument("--height", type=int, default=480)
     p.add_argument("--scale", type=float, default=1.0,
@@ -403,27 +541,106 @@ def main(argv: list[str] | None = None) -> int:
             "edge, and the difference between them IS the horizontal field of view. "
             "Every bearing this sensor emits is wrong until this number is right.")
 
-    src: int | str = int(args.source) if args.source.isdigit() else args.source
-    cap = cv2.VideoCapture(src)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
+    cap, src, is_file = open_source(args.source)
+    # Frame size is requested of a CAMERA only. Asking a file or a network stream to
+    # change resolution is at best ignored and at worst reopens the decoder at a size
+    # the container does not have, so the request is scoped to the case where it means
+    # something.
+    if isinstance(src, int):
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
     if not cap.isOpened():
-        raise SystemExit(f"could not open source {args.source}")
+        raise SystemExit(
+            f"could not open source {args.source!r}.\n"
+            f"  a camera index must exist (try 0);\n"
+            f"  a file path must exist relative to where you ran this;\n"
+            f"  a URL must be one ffmpeg can read — http/https/rtsp, and an HLS .m3u8\n"
+            f"  counts. A YouTube *watch* page is not a stream: resolve it to a media\n"
+            f"  URL first (yt-dlp -g <url>) and pass that.")
+
+    scheme = frame_scheme(src, is_file)
+    # Pacing: default ON for a file, OFF for anything already arriving at its own rate.
+    pace = args.pace if args.pace is not None else is_file
+    native_fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+    period = (1.0 / native_fps) if (pace and 0.0 < native_fps <= 120.0) else 0.0
 
     det = ClassicalDetector(min_area_px=args.min_area, use_horizon=not args.no_horizon)
     print(f"{SENSOR_VERSION}  pose={pose.get('pose_ref')}  "
           f"hfov={pose['hfov_deg']}  yaw={pose['yaw_deg_true']}  "
           f"sigma={pose.get('yaw_uncertainty_deg')}")
+    # WHERE THE FIELD OF VIEW CAME FROM, PRINTED EVERY RUN. hfov_deg feeds every
+    # bearing, every bearing sigma and therefore every SPOOF confidence in the case
+    # file. A measured 61.4 and a guessed 60 look identical in the JSON and produce
+    # verdicts of very different worth, so the pose is asked to declare its provenance
+    # and the node repeats the declaration where the operator will see it.
+    src_note = str(pose.get("hfov_source") or "NOT STATED")
+    if "ASSUM" in src_note.upper() or src_note == "NOT STATED":
+        print(f"  !! HFOV PROVENANCE: {src_note}. Bearings from an unmeasured field of "
+              f"view are arithmetic on a guess. Usable for a pipeline demo; NOT "
+              f"evidence. Measure it before any bearing leaves this machine as a "
+              f"claim — camera_pose_TEMPLATE.json says how.")
+    else:
+        print(f"  hfov provenance: {src_note}")
+    print(f"source={args.source!r}  kind={'file' if is_file else 'camera' if isinstance(src, int) else 'network'}  "
+          f"native_fps={native_fps:.1f}  paced={'yes' if period else 'no'}  "
+          f"loop={'yes' if args.loop else 'no'}  frame_ref={scheme}://")
+    if not is_file and not isinstance(src, int):
+        print("NETWORK SOURCE. Check the feed's terms of use before showing this to a "
+              "room, and keep people out of frame: vessels are the subject, not "
+              "persons.")
     print("NO AIS ON THIS PROCESS. It cannot know an identity.")
 
     last_post = 0.0
+    last_publish = 0.0
+    last_ok = time.time()
+    settle = 0            # frames to skip after a rewind — see the rewind branch
     frames = 0
     t0 = time.time()
+    # How long a LIVE source may deliver nothing before the node gives up. A file gets
+    # no reconnect (it either loops or ends); a camera or a stream gets bounded retries,
+    # because "it blinked" and "it is gone" both look like a failed read and only time
+    # separates them.
+    RECONNECT_GIVE_UP_S = 15.0
     try:
         while True:
             ok, frame = cap.read()
+
             if not ok:
-                break
+                if is_file and args.loop:
+                    if not cap.set(cv2.CAP_PROP_POS_FRAMES, 0):
+                        # Some containers will not seek. Reopening costs a few hundred
+                        # milliseconds and always works.
+                        cap.release()
+                        cap, src, is_file = open_source(args.source)
+                    # THE BACKGROUND MODEL MUST BE REBUILT, AND FORGETTING THIS IS A
+                    # DEMO-VISIBLE BUG. A rewind teleports the scene back several
+                    # seconds; to a background subtractor that is the entire frame
+                    # changing at once, so it reports the whole picture as foreground
+                    # and the console fills with contacts that are an artefact of the
+                    # loop. Rebuilding the detector and skipping the first frames lets
+                    # it re-learn the background before anything is claimed as an
+                    # observation.
+                    det = ClassicalDetector(min_area_px=args.min_area,
+                                            use_horizon=not args.no_horizon)
+                    settle = 25
+                    last_ok = time.time()
+                    continue
+                if is_file:
+                    print("end of clip. Pass --loop to repeat it for the length of "
+                          "the demo.", file=sys.stderr)
+                    break
+                if time.time() - last_ok > RECONNECT_GIVE_UP_S:
+                    print(f"live source delivered nothing for "
+                          f"{RECONNECT_GIVE_UP_S:.0f}s — stopping. The console will "
+                          f"show this node offline, which is the true statement.",
+                          file=sys.stderr)
+                    break
+                time.sleep(0.5)
+                cap.release()
+                cap, src, is_file = open_source(args.source)
+                continue
+
+            last_ok = time.time()
             frames += 1
             h, w = frame.shape[:2]
             dets, horizon = det.detect(frame)
@@ -435,19 +652,46 @@ def main(argv: list[str] | None = None) -> int:
                 contacts = [
                     to_contact(d, horizon_y=horizon, pose=pose, frame_w=w, frame_h=h,
                                scale=args.scale, frame_time=ts,
-                               frame_ref=f"pi://{pose.get('pose_ref')}/{ts.isoformat()}")
+                               frame_ref=f"{scheme}://{pose.get('pose_ref')}/"
+                                         f"{ts.isoformat()}")
                     for d in dets if d["frames"] >= 2
-                ]
+                ] if settle <= 0 else []
                 fps = frames / max(now - t0, 1e-6)
                 print(f"[{ts.strftime('%H:%M:%S')}] {len(dets)} blobs, "
-                      f"{len(contacts)} contacts, {fps:.1f} FPS, horizon y={horizon:.0f}")
+                      f"{len(contacts)} contacts, {fps:.1f} FPS, horizon y={horizon:.0f}"
+                      + (f"  [settling after rewind: {settle}]" if settle > 0 else ""))
                 if args.post and contacts:
-                    post(args.post, contacts)
+                    post(args.post, contacts, node_id=args.node_id,
+                         kind=("mac_camera" if isinstance(src, int) else "video_stream"),
+                         measured_fps=fps)
                 if args.out:
                     with open(args.out, "a", encoding="utf-8") as fh:
                         for c in contacts:
                             fh.write(json.dumps(c) + "\n")
                 last_post = now
+
+            # ---- publish the frame this detector just ran on ---------------------
+            # Rate-capped independently of the contact interval: contacts are the
+            # evidence and go at --interval; the picture is the illustration and 8 fps
+            # is a smooth enough one. Published AFTER detection so the frame and the
+            # boxes are the same observation.
+            if args.publish_frames and args.publish_fps > 0:
+                if now - last_publish >= 1.0 / args.publish_fps:
+                    publish_frame(args.publish_frames, frame, node_id=args.node_id,
+                                  frame_ref=f"{scheme}://{pose.get('pose_ref')}")
+                    last_publish = now
+
+            if settle > 0:
+                settle -= 1
+
+            # ---- pace a recorded clip to its own frame rate ----------------------
+            # Without this a 30 s clip is consumed in about two seconds: the pipeline
+            # sees the whole scene before anyone can look at it, and with --loop it
+            # then spins a core for the rest of the demo. A camera and a network
+            # stream are not paced — they already arrive at their own rate, and
+            # sleeping on top of that is latency added to a live picture.
+            if period:
+                time.sleep(max(0.0, period - (time.time() - now)))
 
             if args.debug:
                 for d in dets:

@@ -4,19 +4,16 @@
 
 ---
 
-## 0. BLOCKER ABOVE THIS ONE — read first
+## 0. BLOCKER ABOVE THIS ONE — CLEARED 2026-08-29
 
-`03_src/verdict.py:122` imports `ConsistencyResult` and `independent_dimension_count`
-from `03_src/consistency.py`. **Neither exists.** Measured:
+**RESOLVED.** `03_src/consistency.py` now exports `ConsistencyResult` (line 201) and
+`independent_dimension_count` (line 214); `03_src/verdict.py:122` imports both. The
+four `ImportError`s recorded here are gone.
 
-```
-import verdict       -> ImportError    import run_pipeline -> ImportError
-import server        -> ImportError    import app          -> ImportError
-```
-
-Both consoles are dead, so none of the failover below can be exercised until lane C
-reconciles those two modules. Filed P0 in `99_scratch/requests.md`. Everything in this
-document is written and unit-verified; it is **not** end-to-end verified, for that reason.
+**What that does and does not license.** The import chain is whole, so the failover
+below *can* now be exercised. It has still not been exercised end to end — §5 lists the
+two quantities that remain unmeasured and both need the Mac. Do not read a cleared
+blocker as a passed test.
 
 ---
 

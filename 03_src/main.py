@@ -385,21 +385,48 @@ def parse_window(spec: str | None, day: str = "2026-08-25"
 # ================================================================================
 
 def start_local_node(args, port: int) -> subprocess.Popen | None:
-    """Run the Mac camera as a sensor node, posting to our own ingest route.
+    """Run THIS MACHINE'S video as a sensor node, posting to our own ingest route.
 
-    The SAME node the Pi runs, with only the frame source swapped -- one pipeline, one
-    bearing model, one set of geometry helpers. Running a second, Mac-specific detector
-    would mean the thing rehearsed is not the thing demonstrated.
+    One node, one bearing model, one set of geometry helpers, whatever the frame source
+    is -- a lens, a clip on disk, or a network stream. Running a second, source-specific
+    detector would mean the thing rehearsed is not the thing demonstrated.
 
     Posts to 127.0.0.1 deliberately even though the server binds 0.0.0.0: a local node
     has no reason to leave the machine, and routing it via the LAN address would make
-    the demo depend on the venue network being up in order to talk to itself."""
+    the demo depend on the venue network being up in order to talk to itself.
+
+    DEFECT FIXED HERE, 2026-08-29, AND IT HAD NEVER WORKED.
+      OBSERVED  -- `python 03_src/main.py --camera 0` started, printed the node command,
+                   and then the console showed no live node at all.
+      CLAIMED   -- this function launches the sensor node with the chosen camera.
+      THE MISMATCH -- it passed `--camera`, and the node's flag was `--source`.
+                   argparse rejected the unknown flag and the child exited immediately
+                   with status 2. Because the child's output is piped and only relayed
+                   by pump(), the argparse error went where nobody was looking.
+      WHY IT MATTERS -- the live-sensor path was dead on the ONE flag that turns it on,
+                   and it failed silently: no traceback in the parent, no node in the
+                   console, nothing to distinguish it from a camera that sees nothing.
+      THE FIX   -- pass `--source`, which the node has always accepted; the node now
+                   also accepts `--camera` as an alias for the same dest, so neither
+                   spelling can be wrong again.
+      CONFIDENCE -- certain; it is one argparse definition and one string.
+
+    THE NODE ALSO PUBLISHES ITS FRAMES. server.py then relays exactly the JPEG the
+    detector ran on, so the console's boxes and its imagery are one observation. The
+    server is deliberately NOT given the same video to decode for itself: two decoders
+    on one file hold two independent positions in it and the boxes drift off the hulls.
+    One decoder, and if it dies /stream honestly reports that the video stopped."""
     node = _DEMO / "pi_sensor.py"
+    source = args.video if args.video is not None else str(args.camera)
     cmd = [sys.executable, str(node),
-           "--camera", str(args.camera),
+           "--source", str(source),
            "--pose", str(args.pose),
            "--scale", str(args.scale),
+           "--node-id", str(args.node_id),
+           "--publish-frames", f"http://127.0.0.1:{port}/ingest/frame",
            "--post", f"http://127.0.0.1:{port}/api/contacts"]
+    if args.loop:
+        cmd.append("--loop")
     print(f"[node] {' '.join(cmd)}")
     try:
         return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -460,7 +487,16 @@ examples
       T1. Synthetic scenario with injected faults and ground truth. No hardware.
 
   python 03_src/main.py --camera 0 --scale 20
-      T1 plus the Mac camera as a live sensor node over the tabletop rig.
+      T1 plus a lens on this machine as a live sensor node over the tabletop rig.
+
+  python 03_src/main.py --video 02_data/clips/approach.mp4 --loop --scale 20
+      T1 plus a VIDEO as the EO sensor -- the path that replaced the Raspberry Pi.
+      The node detects on the clip and publishes the frames it detected on, so the
+      console shows the video with its own boxes over it.
+
+  python 03_src/main.py --video "https://host/live/stream.m3u8" --scale 1
+      The same, on a network stream. CHECK THE FEED'S TERMS BEFORE SHOWING IT, and
+      keep people out of frame: vessels are the subject, not persons.
 
   python 03_src/main.py --ais 02_data/slices/aisdk-2026-08-25_fehmarn_belt.csv \\
                         --window 10:00-11:00 --speed 60
@@ -489,6 +525,22 @@ examples
                    help="static scene only; do not start the clock")
     p.add_argument("--camera", type=int, default=None,
                    help="also run this local camera index as a sensor node")
+    p.add_argument("--video", default=None,
+                   help="THE EO SOURCE THAT REPLACED THE PI. A video file on disk, or "
+                        "a network stream URL (http/https/rtsp; an HLS .m3u8 counts). "
+                        "Runs the sensor node on it and shows it in the console. "
+                        "Mutually exclusive with --camera.")
+    p.add_argument("--loop", action="store_true",
+                   help="rewind a video file at the end, so the clip outlasts the "
+                        "pitch instead of the sensor going dark mid-sentence")
+    p.add_argument("--node-id", default="sensor-01",
+                   help="provenance. Appears on every contact and in the case file.")
+    p.add_argument("--live", action="store_true",
+                   help="PROMOTE THE LIVE SENSOR at startup instead of the recorded "
+                        "scene. Off by default: the recorded scene carries the full "
+                        "ranked picture with its injected faults, and a blob detector "
+                        "on a short clip does not. The console can switch either way "
+                        "at any time; this only chooses what is live when it opens.")
     p.add_argument("--scale", type=float, default=1.0,
                    help="metres of sea per metre of table (tabletop rig)")
     p.add_argument("--pose", default=str(_DEMO / "camera_pose_TABLETOP.json"),
@@ -515,6 +567,10 @@ examples
                    help="DANGEROUS. Leave off for anything a judge or camera can see.")
     p.add_argument("--preflight-only", action="store_true")
     args = p.parse_args(argv)
+
+    if args.video is not None and args.camera is not None:
+        raise SystemExit("--video and --camera are mutually exclusive: one node, one "
+                         "frame source, so the case file can name it.")
 
     print("=" * 78)
     print("  MARITIME APPROACHES — shore station, one command")
@@ -562,10 +618,45 @@ examples
         web_dir=Path(args.web),
         audit_path=_DEMO / "operator_audit.jsonl",
         mjpeg_url=None,
-        camera_index=None,          # /stream stays honest; the node owns the camera
+        # THE SERVER GETS THE VIDEO TOO, and this reverses an earlier decision.
+        #
+        # It used to pass None here, reasoning that the node owns the frame source and
+        # two decoders on one file drift apart. The reasoning was right; the
+        # consequence was not. It made the PICTURE depend entirely on the NODE, so a
+        # node that refused to start over something unrelated — an unfilled pose file,
+        # on the first real run — left the console reporting "no video source
+        # configured" about a source the operator had explicitly configured.
+        #
+        # server.py's /stream now serves the relay whenever a node is publishing and
+        # decodes only when one is not, switching between them inside the same
+        # response. So the single-decoder guarantee still holds while it matters, and
+        # when the node is down there is still a picture instead of a false statement.
+        #
+        # A camera index is NOT passed: macOS will not usually open the built-in camera
+        # twice, and the node needs it more than the pane does.
+        camera_index=None,
+        video_source=(args.video if args.video is not None else None),
         allow_real_identities=args.allow_real_identities,
         node_stale_after_s=8.0,
-        initial_source="RECORDED",
+        # RECORDED UNLESS ASKED OTHERWISE. This reverses patch 7, which made --video
+        # promote the live node automatically.
+        #
+        # WHY THAT WAS WRONG: the active source decides whose CONTACTS reach the
+        # picture, not which imagery is shown. Promoting the node discarded the
+        # recorded scene -- 8 contacts, 12 AIS claims, an injected fault plan producing
+        # 3 SPOOF / 2 DARK / 2 UNKNOWN / 1 MATCH -- and replaced it with what a
+        # background subtractor finds in a short clip: two blobs, no identities, two
+        # DARK verdicts. Nothing errored. The picture was simply replaced by a much
+        # poorer one that still looked plausible, which is the worst failure shape there
+        # is.
+        #
+        # So the default is RECORDED again, for source_switch.py's original reason: it
+        # is the only source that cannot fail. --live promotes the node when the live
+        # path is actually what you want to show, and the operator can switch at any
+        # time from the console.
+        initial_source=("MAC_CAMERA" if (args.live and args.camera is not None)
+                        else "VIDEO_STREAM" if (args.live and args.video is not None)
+                        else "RECORDED"),
         startup_tasks=startup_tasks,
         # Handed to the factory rather than set on the backend afterwards, because the
         # lifespan runs one recompute at startup: set it later and the FIRST picture a
@@ -574,7 +665,8 @@ examples
         ais_coverage_confidence=args.ais_coverage_confidence,
     )
 
-    node_proc = start_local_node(args, args.port) if args.camera is not None else None
+    node_proc = (start_local_node(args, args.port)
+                 if (args.camera is not None or args.video is not None) else None)
     if node_proc is not None:
         pump(node_proc, "node")
 
@@ -582,14 +674,19 @@ examples
     url = f"http://127.0.0.1:{args.port}/"
     print("\n" + "=" * 78)
     print(f"  CONSOLE      {url}")
-    print(f"  PI POSTS TO  http://{ip}:{args.port}/api/contacts")
+    print(f"  SENSOR POSTS http://{ip}:{args.port}/api/contacts")
     print("=" * 78)
     print(f"  scene        {args.scene}")
     print(f"  AIS          " + ("static scene (no clock)" if replay is None else
                                 f"{Path(args.ais).name} @ {args.speed:g}x, "
                                 f"{len(replay.tracks)} reports"))
-    print(f"  local node   " + (f"camera {args.camera}, scale {args.scale:g}"
-                                if node_proc else "none (Pi posts on its own)"))
+    print(f"  EO source    " + (
+        f"video {args.video}{' (looping)' if args.loop else ''}, scale {args.scale:g}"
+        if node_proc and args.video is not None else
+        f"camera {args.camera}, scale {args.scale:g}"
+        if node_proc else
+        "none — RECORDED scene only. Pass --video <file|url> or --camera 0 to put a "
+        "live sensor and a picture on the console."))
     print(f"  AIS coverage " + (
         f"{args.ais_coverage_confidence:.2f} (stated by you)"
         if args.ais_coverage_confidence is not None
@@ -600,11 +697,12 @@ examples
                                 else "pseudonymised on every outbound route"))
     print(f"  audit trail  {_DEMO / 'operator_audit.jsonl'}   (criterion 4)")
     print("=" * 78)
-    print("  On the Pi:")
-    print(f"    python3 edge/sensor_node.py --post http://{ip}:{args.port}"
-          f"/api/contacts --pose <pose.json>")
-    print(f"    python3 04_demo/pi_sensor.py --post http://{ip}:{args.port}"
-          f"/api/contacts --pose <pose.json>      # classical fallback")
+    print("  A sensor node on ANOTHER machine, if you ever want one:")
+    print(f"    python3 04_demo/pi_sensor.py --source <file|url|index> \\")
+    print(f"        --pose <pose.json> \\")
+    print(f"        --post http://{ip}:{args.port}/api/contacts \\")
+    print(f"        --publish-frames http://{ip}:{args.port}/ingest/frame")
+    print(f"    (needs --host 0.0.0.0, which is this file's default)")
     print("  Ctrl-C to stop.\n")
 
     if not args.no_browser:

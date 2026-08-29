@@ -47,3 +47,9 @@ yolov8n.pt
 # Session backups. The repo is PUBLIC; a .bak of evidence.py or server.py
 # publishes a superseded copy of the code the case files are built from.
 *.bak-*
+
+# RESTRICTED — constraint 9, and the sharpest irony in the tree. This is the script
+# that REMOVED the prior-work disclosure terms from five tracked files. Its `old`
+# anchors necessarily quote the very sentences it deleted, so tracking it republishes
+# them in a public repo. Kept on disk as the compliance record; never committed.
+99_scratch/patch_compliance.py

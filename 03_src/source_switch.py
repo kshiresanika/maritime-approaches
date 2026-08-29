@@ -18,10 +18,14 @@ the one day it fires.
 
 WHAT A SOURCE IS
 A source is a NODE, not a new concept. `RECORDED` is the `scene-file` node server.py
-already registers at startup; `EDGE_PI` is the Pi; `MAC_CAMERA` is the same
-`edge/sensor_node.py` running on the MacBook with `--backend cv2 --kind mac_camera`.
-Nothing new has to exist for a source to exist, which is why this is a thirty-minute
-change and not a subsystem.
+already registers at startup; `VIDEO_STREAM` is 04_demo/pi_sensor.py decoding a video
+file or a network stream on this machine; `MAC_CAMERA` is the same node with a lens
+instead of a file. Nothing new has to exist for a source to exist, which is why this is
+a thirty-minute change and not a subsystem.
+
+UPDATED 2026-08-29 — EDGE_PI IS RETIRED. The Raspberry Pi left the rig. Everything below
+about failover still holds word for word; only the name of the source that can die has
+changed, and that is the point of having had the switch at all.
 
 WHY THE LABELS MAP ONTO SensorKind RATHER THAN BECOMING A SECOND ENUM
 `contracts.SensorKind` is already `edge_pi | mac_camera | file`. Introducing a parallel
@@ -61,11 +65,26 @@ SWITCH_VERSION = "source_switch/0.1.0"
 # The operator-facing labels the brief specifies, mapped onto the contract's own
 # vocabulary. This dict is the ONLY place the two spellings meet.
 LABEL_TO_KIND: dict[str, SensorKind] = {
-    "EDGE_PI": "edge_pi",
+    "VIDEO_STREAM": "video_stream",
     "MAC_CAMERA": "mac_camera",
     "RECORDED": "file",
 }
 KIND_TO_LABEL: dict[str, str] = {v: k for k, v in LABEL_TO_KIND.items()}
+
+# RETIRED 2026-08-29 — the Raspberry Pi is out of the rig.
+#
+# WHY THE LABEL IS REMOVED FROM THE SELECTABLE SET RATHER THAN LEFT IN PLACE:
+# status() publishes LABEL_TO_KIND as `available_sources`, and the console renders one
+# button per member. Leaving EDGE_PI there offers the operator a source that can never
+# go live. A button that does nothing is exactly the class of confusion this tool exists
+# to remove, and a judge who presses it gets a dead picture and a good question.
+#
+# WHY IT IS RECOGNISED RATHER THAN SIMPLY DELETED: a node that has not been told may
+# still post kind 'edge_pi'. normalise() keeps recognising the spelling so that it can
+# answer "that source is retired" instead of "unknown source" — a ten-second diagnosis
+# instead of a ten-minute one at 03:00. accepts() catches the ValueError and returns
+# False, so a Pi that reappears is still never silently promoted into the picture.
+RETIRED_LABELS: dict[str, SensorKind] = {"EDGE_PI": "edge_pi"}
 
 # RECORDED is the default because it is the only source that cannot fail. The scene is
 # already on disk and already loaded; if every camera in the room dies, the demo still
@@ -93,6 +112,11 @@ def normalise(source: str) -> str:
         return s.upper()
     if s.lower() in KIND_TO_LABEL:
         return KIND_TO_LABEL[s.lower()]
+    if s.upper() in RETIRED_LABELS or s.lower() in RETIRED_LABELS.values():
+        raise ValueError(
+            f"source {source!r} is RETIRED. The Raspberry Pi node left the rig on "
+            f"2026-08-29; the EO source is now VIDEO_STREAM — a video file or network "
+            f"stream decoded on this machine. Valid: {sorted(LABEL_TO_KIND)}")
     raise ValueError(
         f"unknown source {source!r}. Valid: {sorted(LABEL_TO_KIND)} "
         f"or {sorted(KIND_TO_LABEL)}")
