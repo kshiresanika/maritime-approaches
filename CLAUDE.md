@@ -35,7 +35,7 @@ civilian track (EMSA, BSH, offshore wind, seabed cables).
 - Check and cite the licence on every dataset and feed before use.
 - If a live camera faces a public waterway: vessels are the subject, not persons.
 - Do not commit proprietary code before IP terms are confirmed.
-- Never mention the mothership/child-drone architecture or FARU.
+- Never disclose prior unpublished architecture work. Clean-room only.
 - Always add explanatory notes in code explaining each step and why.
 - Be detailed on cause and effect — show the inference chain: observed vs. claimed,
   why the mismatch matters, confidence, and what would change the answer.

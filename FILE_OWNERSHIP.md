@@ -223,8 +223,8 @@ format is the cheapest thing to fix at 20:00 and the most expensive at 04:00.
 6. **`03_src` is not importable as a package** (leading digit). Convention is
    `sys.path` + flat imports; see `LIBRARIES.md`. Do not invent a different one.
 7. **Two files leak restricted material.** `EDTH_Hamburg_Topic02_COMPLETE.md`
-   and `00_SHARED_macOS_Demo_Architecture.md` reference the mothership/child-drone
-   architecture and FARU. Constraint 9 forbids disclosure and hackathons often
+   and `00_SHARED_macOS_Demo_Architecture.md` contain prior unpublished work.
+   Constraint 9 forbids disclosure and hackathons often
    require open-sourcing. **Both are gitignored — keep it that way.** Related and
    still open: constraint 8, the event IP terms, which gate the first commit at all.
 8. **The date landmine is real and silent.** Timestamps are `dd/mm/yyyy`; pandas

@@ -67,7 +67,7 @@ in the scene and in the case file.
 
 The scrub is a SUBSTRING PASS OVER EVERY STRING IN THE DUMP, not a field whitelist.
 Reason, and it is the failure this file exists to prevent: render_rationale() writes
-"a contact broadcasting MMSI 219000123" into free text, and lane A's track_id is a
+"a contact broadcasting MMSI 999000123" into free text, and lane A's track_id is a
 surrogate over (source, MMSI) so it embeds the MMSI too. Pseudonymising the structured
 identity fields while leaving those two alone produces a document that LOOKS anonymised
 and is not — the worst of the three possible outcomes, because it is the one nobody

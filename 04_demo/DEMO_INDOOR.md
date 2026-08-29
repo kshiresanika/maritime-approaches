@@ -13,7 +13,8 @@ Read this before panicking, because the loss is smaller than it feels.
 **Lost:** live vessels in frame. Nothing else.
 
 **Not lost:** the AIS half is *recorded* data and was never going to be live anyway — it
-is real Danish Maritime Authority traffic from the Fehmarn Belt, 32.6 M rows, and it does
+is real Danish Maritime Authority traffic from the Fehmarn Belt, 1.2 M rows cut from a
+32.6 M-row national day file, and it does
 not care where the laptop is. Association, consistency, verdict, prioritization and
 evidence are all pure functions of `EoContact` + `AisTrack`. **Not one line of
 `03_src/` needs to change.** Only the thing that *produces* `EoContact` changes.
@@ -95,7 +96,7 @@ camera at one end.
 This is not a toy demo — it exercises the **real optics and the real geometry**:
 
 1. Declare a synthetic anchor position (a plausible Fehmarn Belt lat/lon) as the camera's
-   location, and a **scale factor** (suggested: 1 cm on the table = 20 m of sea).
+   location, and a **scale factor** (suggested: 1 cm on the table = 20 cm of sea, i.e. `--scale 20`).
 2. Survey the pose the way you would survey a real coastal camera: measure the camera
    height above the table with a ruler, the boresight direction with the phone compass,
    and record it in `camera_pose_TEMPLATE.json`. **Set `yaw_uncertainty_deg` honestly** —
@@ -116,7 +117,9 @@ back to D2.
 ### D2 — Screen-as-scene (FALLBACK ONLY)
 
 Point the camera at a second monitor playing a harbour clip. YOLO fires reliably on real
-vessel pixels, which proves the detector is live at 45 FPS on real imagery.
+vessel pixels, which proves the detector is live. NOTE the 45.0 FPS figure is a SYNTHETIC-FRAME
+measurement on the M4 (STATUS 2026-08-27) and says nothing about throughput on real
+decoded video, which is UNMEASURED.
 
 **Bearings from this configuration are meaningless** and must not be claimed. Run it with
 `uncalibrated_benchmark_pose()`, whose `yaw_uncertainty_deg` is **180 on purpose** — that
@@ -146,7 +149,8 @@ show *fusion*.
 Put this on a slide, in these words or close to them. Judges reward it and the ethical
 floor requires it.
 
-> **What is real:** the AIS is real. 32.6 M rows of Danish Maritime Authority traffic from
+> **What is real:** the AIS is real. 1.2 M rows of Danish Maritime Authority traffic
+> (cut from a 32.6 M-row national day file) from
 > the Fehmarn Belt, 2026-08-25 — a real government dataset with a real licence, carrying
 > real vessel behaviour, real coverage holes and real reporting gaps. Every measured
 > number in this pitch came out of it.
@@ -155,7 +159,7 @@ floor requires it.
 > observations are forward-projected from the AIS through a declared camera pose, and the
 > anomalies are injected deliberately so the false-positive rate can be measured against
 > known ground truth. The live tabletop segment uses the real detector and the real
-> geometry at 1:2000 scale.
+> geometry at 1:20 scale (`--scale 20`: metres of sea per metre of table).
 >
 > **What we therefore cannot claim:** a detection rate against real sea clutter, real
 > weather, real glare, or real range. Those need a camera pointed at water, and that is

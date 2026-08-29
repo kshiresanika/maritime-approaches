@@ -152,7 +152,7 @@ _banned = ("mmsi", "name", "imo", "callsign", "identity", "ais")
 _leak = [k for k in p if any(b in k.lower() for b in _banned)]
 check("no identity-shaped key in the payload", not _leak, str(_leak))
 try:
-    EoContact(**{**p, "claimed_mmsi": "219000001"}); _rej = False
+    EoContact(**{**p, "claimed_mmsi": "999000001"}); _rej = False
 except Exception:
     _rej = True
 check("an injected claimed_mmsi is REJECTED (extra=forbid)", _rej)

@@ -51,6 +51,19 @@
        padding-left:8px;margin-top:4px}
   .score{margin-top:10px;padding:8px;border:1px solid var(--line);font-size:11px}
   .ok{color:var(--match)} .bad{color:var(--spoof)}
+  /* ---- injection provenance (mirrors 03_src/web/index.html .badge.inj / #cInject) */
+  .tag.inj{color:var(--unknown);border-style:dashed}
+  #cInject{display:none}
+  #cInject.on{display:inline-block;color:var(--unknown);border-color:var(--unknown)}
+  .prov{margin-top:10px;padding:8px;border:2px dashed var(--unknown);background:#141b22;
+        font-size:11px;line-height:1.5}
+  .prov b{color:var(--unknown);letter-spacing:.06em}
+  /* ---- identity guard banner (mirrors 03_src/web/index.html #idAlarm) --------
+     Lives in the grid with grid-column:1/-1, so raising it re-flows the two panes
+     inside the existing 100vh box instead of pushing the console off-screen. */
+  #idAlarm{display:none;grid-column:1/-1;background:#3a0f14;border:2px solid var(--spoof);
+           color:var(--ink);padding:9px 14px;font-weight:800;letter-spacing:.03em}
+  #idAlarm.on{display:block}
 </style>
 </head>
 <body>
@@ -62,10 +75,15 @@
   <span class="mode" id="source" title="which sensor is feeding the picture">SOURCE —</span>
   <span id="srcbtns" style="font-size:11px"></span>
   <span id="srcnote" style="color:var(--dim);font-size:11px"></span>
+  <!-- Identity mode and injection state ride on /api/state, so neither badge can go
+       stale independently of the picture it describes. -->
+  <span class="mode" id="cIdent" title="whether the server is pseudonymising identities">IDENT —</span>
+  <span class="mode" id="cInject" title="a scripted injection is in the scene — nothing here was observed by a camera">INJECTED —</span>
   <span id="counts" style="color:var(--dim);font-size:11px"></span>
   <span class="caveat" id="caveat"></span>
 </header>
 <main>
+  <div id="idAlarm" role="alert" aria-live="assertive"></div>
   <section>
     <h2>Plan view — camera, field of view, claims and contacts</h2>
     <svg id="plan" viewBox="0 0 1000 700" preserveAspectRatio="xMidYMid meet"></svg>
@@ -87,6 +105,110 @@
 // No framework, no CDN. The demo has to run with the wifi off.
 // ---------------------------------------------------------------------------
 let DATA=null, SEL=null;
+
+/* ---------------------------------------------------------------------------
+   IDENTITY RENDERING - DEFENCE IN DEPTH.
+   Ported deliberately unchanged from the primary console
+   (03_src/web/index.html:449-474) so the two consoles cannot drift on the one
+   rule this project treats as non-negotiable: no real vessel is ever named on a
+   public-facing screen.
+   The server pseudonymises before serving; this is the SECOND lock. It is needed
+   HERE because `03_src/server.py --web 04_demo/web --allow-real-identities` is a
+   documented, supported invocation, and in that combination REAL claimed_mmsi,
+   claimed_name, claimed_imo and claimed_callsign reach this page - which used to
+   print all four verbatim under a SPOOF badge. Naming a real tanker as a saboteur
+   on a projector is the one failure here that cannot be walked back.
+   --------------------------------------------------------------------------- */
+const SYNTH_MID='999';
+function identitiesReal(){ return (DATA&&DATA.identities)==='REAL'; }
+function renderIdent(mmsi){
+  if(mmsi==null||mmsi==='') return {text:'— no AIS claim —', safe:true};
+  if(identitiesReal()) return {text:String(mmsi), safe:true};   // explicit operator opt-in
+  if(String(mmsi).startsWith(SYNTH_MID)) return {text:String(mmsi), safe:true};
+  return {text:'REDACTED', safe:false};
+}
+/* name / IMO / callsign name a hull as hard as an MMSI does and carry no 999-
+   prefix of their own to test, so they are gated on the record's MMSI - exactly
+   how the primary console gates claimed_name (03_src/web/index.html:1271-1273).
+   ONE TIGHTENING over that line: a non-empty value with NO MMSI to test against
+   cannot be cleared by the check, so it is withheld rather than trusted. */
+function renderIdentField(claimed,key,val){
+  if(val==null||val==='') return {text:'—', safe:true};
+  if(/mmsi/i.test(key)) return renderIdent(val);
+  if(identitiesReal()) return {text:String(val), safe:true};
+  const m=claimed&&claimed.claimed_mmsi;
+  return (m&&renderIdent(m).safe) ? {text:String(val), safe:true}
+                                  : {text:'REDACTED', safe:false};
+}
+function raiseIdAlarm(mmsiLike){
+  const box=document.getElementById('idAlarm');
+  if(!box||box.classList.contains('on')) return;
+  box.textContent='IDENTITY GUARD TRIPPED — the server sent an identifier that is not '
+    +'pseudonymised ('+String(mmsiLike==null?'':mmsiLike).slice(0,4)+'…). It has been '
+    +'withheld from this screen. Do not present this session; restart the server '
+    +'without --allow-real-identities.';
+  box.classList.add('on');
+}
+
+/* Injected-scenario provenance. Read from frame_ref, which is a real EoContact
+   field, so this is the SAME fact the exported case file carries and not a
+   parallel UI flag that could disagree with it.
+   Ported from 03_src/web/index.html:802-815. */
+function isInjected(r){
+  const f=(r&&r.eo_contact&&r.eo_contact.frame_ref)||'';
+  if(String(f).startsWith('injected://')) return true;
+  return ((r&&r.frame_refs)||[]).some(x=>String(x).startsWith('injected://'));
+}
+function injectedScenario(r){
+  const f=(r&&r.eo_contact&&r.eo_contact.frame_ref)
+    ||((r&&r.frame_refs)||[]).find(x=>String(x).startsWith('injected://'))||'';
+  const m=/^injected:\/\/([^/]+)\//.exec(String(f));
+  return m?m[1]:'injected';
+}
+
+/* Defer state in words. Both branches are spoken: 03_src/evidence.py:871-873
+   renders the negative branch explicitly rather than leaving it blank, because an
+   empty space is not a statement. */
+function deferText(v){
+  return v.defer_to_human ? 'DEFERRED TO A HUMAN OPERATOR'
+                          : 'above the recommendation threshold';
+}
+
+function svgTitle(node,text){
+  const t=document.createElementNS('http://www.w3.org/2000/svg','title');
+  t.textContent=text; node.appendChild(t); return node;
+}
+// A marker encoded the verdict as colour and nothing else - no confidence, no
+// defer state, no hover. Colour alone cannot carry "the tool is not sure".
+function markerTitle(r){
+  const v=r.verdict;
+  const id=renderIdent(r.identity_claimed&&r.identity_claimed.claimed_mmsi);
+  return 'MMSI '+id.text+' — '+v.label+(v.spoof_subtype?' / '+v.spoof_subtype:'')
+    +' — confidence '+v.confidence.toFixed(2)+' — '+deferText(v)
+    +(isInjected(r)?' — INJECTED ('+injectedScenario(r)+'): no camera observed this':'');
+}
+
+function renderIdentityChip(){
+  const el=document.getElementById('cIdent'); if(!el) return;
+  const real=identitiesReal();
+  el.textContent='IDENT '+(real?'REAL — DO NOT PRESENT':'pseudonymised');
+  el.style.borderColor=real?'var(--spoof)':'';
+  el.style.color=real?'var(--spoof)':'';
+}
+function renderInjectChip(){
+  const el=document.getElementById('cInject'); if(!el) return;
+  const recs=DATA.records||[];
+  const any=recs.some(isInjected);
+  /* OR, not AND. 03_src/server.py sets body["injection"] on /api/state precisely so
+     the console does not have to derive this from frame_ref alone: a scene whose
+     injected contact has scrolled out of the served records would otherwise look
+     clean, and "clean" is the one thing this must never say when it is not true. */
+  const on=any||!!DATA.injection;
+  el.classList.toggle('on',on);
+  const scen=(DATA.injection&&DATA.injection.scenario)
+    ||(any?injectedScenario(recs.find(isInjected)):'—');
+  el.textContent='INJECTED '+(on?scen:'—');
+}
 
 async function poll(){
   try{
@@ -118,6 +240,7 @@ function render(){
     `${c.tracks} claims · ${c.contacts} contacts · ${c.matched} matched · `+
     `${c.dark_candidates} unclaimed · ${c.unobserved_claims} unobserved`;
   document.getElementById('caveat').textContent = DATA.caveat||'';
+  renderIdentityChip(); renderInjectChip();
   drawPlan(); drawList(); drawScoring();
   if(SEL) drawEvidence(SEL);
 }
@@ -223,9 +346,13 @@ function drawPlan(){
   for(const r of recs){
     const col=COL[r.verdict.label]||'#5a6b7c';
     const sel=SEL&&SEL.record_id===r.record_id;
+    const inj=isInjected(r);
     if(r.ais_track){
       const [x,y]=P(r.ais_track.claimed_lat_deg,r.ais_track.claimed_lon_deg);
-      const g=N('circle',{cx:x,cy:y,r:sel?9:7,fill:'none',stroke:col,'stroke-width':sel?2.5:1.6});
+      const ra={cx:x,cy:y,r:sel?9:7,fill:'none',stroke:col,'stroke-width':sel?2.5:1.6};
+      if(inj) ra['stroke-dasharray']='5 3';
+      const g=N('circle',ra);
+      svgTitle(g,markerTitle(r));
       g.style.cursor='pointer'; g.onclick=()=>{SEL=r;render();};
     }
     // A contact is a bearing from the camera. Drawing the ray is the honest picture:
@@ -234,8 +361,16 @@ function drawPlan(){
       const b=r.eo_contact.observed_bearing_deg_true;
       const rm=(r.eo_contact.observed_range_m||pose.max_range_m*0.6)*pxPerM;
       const [x,y]=pt(b,rm);
-      N('line',{x1:cx,y1:cy,x2:x,y2:y,stroke:col,'stroke-width':sel?1.6:0.8,'stroke-opacity':sel?.9:.35});
-      const g=N('circle',{cx:x,cy:y,r:sel?6:4,fill:col});
+      const la={x1:cx,y1:cy,x2:x,y2:y,stroke:col,'stroke-width':sel?1.6:0.8,'stroke-opacity':sel?.9:.35};
+      if(inj) la['stroke-dasharray']='6 4';
+      N('line',la);
+      // Dashed halo on an injected contact. The dash is the same device the primary
+      // console uses on the video bbox (03_src/web/index.html:1019), and it survives
+      // the verdict colour rather than replacing it.
+      const da={cx:x,cy:y,r:sel?6:4,fill:col};
+      if(inj){ da.stroke='#dce6ef'; da['stroke-width']=1.6; da['stroke-dasharray']='2 2'; }
+      const g=N('circle',da);
+      svgTitle(g,markerTitle(r));
       g.style.cursor='pointer'; g.onclick=()=>{SEL=r;render();};
     }
   }
@@ -247,7 +382,9 @@ function drawList(){
     const v=r.verdict, p=r.priority;
     const d=document.createElement('div');
     d.className='row '+v.label+(SEL&&SEL.record_id===r.record_id?' sel':'');
-    const id=r.identity_claimed.claimed_mmsi||'— no AIS claim —';
+    const idg=renderIdent(r.identity_claimed&&r.identity_claimed.claimed_mmsi);
+    if(!idg.safe) raiseIdAlarm(r.identity_claimed&&r.identity_claimed.claimed_mmsi);
+    const id=idg.text;
     const sub=v.spoof_subtype?` / ${v.spoof_subtype}`:'';
     d.innerHTML=
       `<div class="top"><span class="rank">${p.rank}</span>`+
@@ -260,6 +397,7 @@ function drawList(){
       (p.time_to_intercept_min!=null?` · ${p.time_to_intercept_min.toFixed(0)} min out`:'')+
       `</div>`+
       `<div class="meta">`+
+      (isInjected(r)?`<span class="tag inj">INJECTED · ${injectedScenario(r)}</span> `:'')+
       (v.defer_to_human?`<span class="tag defer">DEFER TO HUMAN</span> `:'')+
       (p.scarce_asset_recommended?`<span class="tag send">RECOMMEND ASSET</span>`:'')+
       `</div>`+
@@ -277,15 +415,44 @@ function drawEvidence(r){
   const v=r.verdict, p=r.priority;
   let h=`<div class="kv">`+
     `<b>record</b><span>${r.record_id}</span>`+
-    `<b>verdict</b><span class="${v.label}">${v.label}${v.spoof_subtype?' / '+v.spoof_subtype:''} — confidence ${v.confidence.toFixed(2)}</span>`+
+    `<b>verdict</b><span class="${v.label}">${v.label}${v.spoof_subtype?' / '+v.spoof_subtype:''} — confidence ${v.confidence.toFixed(2)} — `+
+      (v.defer_to_human
+        ?`<span class="defer" style="font-weight:700">DEFERRED TO A HUMAN OPERATOR</span>`
+        :`<span style="color:var(--dim)">above the recommendation threshold</span>`)+`</span>`+
     `<b>decided</b><span>${v.decided_at_utc}</span>`+
     `<b>ruleset</b><span>${v.ruleset_version}</span>`+
     `<b>pipeline</b><span>${r.pipeline_version}</span></div>`;
 
+  // Mirrors 03_src/evidence.py:885-889 - when the pipeline deferred, the pane says so
+  // in full rather than presenting a settled machine conclusion.
+  if(v.defer_to_human){
+    h+=`<div class="lim" style="border-left-color:var(--dark);color:var(--dark)">`+
+       `<b>This tool is not making a recommendation on this contact.</b> It is presenting `+
+       `what it measured and why it is not sure. The reasons are listed under Limitations below.`+
+       `</div>`;
+  }
+
+  // PROVENANCE, stated before anything that looks like a finding.
+  if(isInjected(r)){
+    h+=`<div class="prov"><b>PROVENANCE — THIS CONTACT WAS INJECTED</b><br>`+
+       `Supplied by the operator as a scripted demonstration (scenario "${injectedScenario(r)}"). `+
+       `<b>NO CAMERA OBSERVED IT.</b> Its bearing, range and their uncertainties are the `+
+       `harness's; the attributes under comparison were set deliberately. The label travels `+
+       `in frame_ref, so it is in the exported case file too.</div>`;
+  }
+
+  const claimed=r.identity_claimed||{};
   h+=`<h2 style="margin-top:12px">Claimed identity</h2><div class="kv">`+
-     Object.entries(r.identity_claimed).map(([k,val])=>
-       `<b>${k.replace('claimed_','')}</b><span>${val??'—'}</span>`).join('')+
-     `</div><div class="lim">These are CLAIMS made by a transponder. This tool never asserts a vessel's identity.</div>`;
+     Object.entries(claimed).map(([k,val])=>{
+       const f=renderIdentField(claimed,k,val);
+       if(!f.safe) raiseIdAlarm(claimed.claimed_mmsi!=null?claimed.claimed_mmsi:val);
+       return `<b>${k.replace('claimed_','')}</b>`+
+              `<span${f.safe?'':' class="bad"'}>${f.text}</span>`;
+     }).join('')+
+     `</div><div class="lim">These are CLAIMS made by a transponder. This tool never asserts a vessel's identity.</div>`+
+     (identitiesReal()
+       ?`<div class="lim bad">Identities are REAL — the server was started with --allow-real-identities. Do not present, screenshot or publish this screen.</div>`
+       :'');
 
   if(r.mismatches.length){
     h+=`<h2 style="margin-top:12px">Claimed vs observed</h2><table><tr>`+
@@ -305,7 +472,15 @@ function drawEvidence(r){
   h+=`<h2 style="margin-top:12px">Rationale</h2><div style="font-size:12px">${r.rationale_text}</div>`+
      `<div class="lim">source: ${r.rationale_model}</div>`;
 
+  // Stated FIRST, above the real limitations (03_src/web/index.html:1521-1533):
+  // a scripted contact that reads like a real detection is the single most
+  // misleading thing this console could put in front of a judge.
   h+=`<h2 style="margin-top:12px">Limitations</h2>`+
+     (isInjected(r)
+       ?`<div class="lim" style="border-left-color:var(--unknown);color:var(--unknown);font-weight:700">`+
+        `THIS CONTACT WAS INJECTED by the operator as a scripted demonstration `+
+        `(scenario "${injectedScenario(r)}"). No camera observed it.</div>`
+       :'')+
      r.limitations.map(l=>`<div class="lim">${l}</div>`).join('');
 
   document.getElementById('ev').innerHTML=h;

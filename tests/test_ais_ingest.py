@@ -70,9 +70,9 @@ def _frame(rows):
 
 def test_landmine_1_duplicate_receptions_collapse_to_one_report():
     frame = _frame([
-        ["25/08/2026 00:00:00", 245043000, 54.629105, 11.348278, "Class A"],
-        ["25/08/2026 00:00:00", 245043000, 54.629105, 11.348278, "Class A"],
-        ["25/08/2026 00:00:01", 245043000, 54.629200, 11.348300, "Class A"],
+        ["25/08/2026 00:00:00", 999043000, 54.600000, 11.300000, "Class A"],
+        ["25/08/2026 00:00:00", 999043000, 54.600000, 11.300000, "Class A"],
+        ["25/08/2026 00:00:01", 999043000, 54.600100, 11.300100, "Class A"],
     ])
     stats = IngestStats()
     out = drop_duplicate_receptions(frame, set(), stats)
@@ -86,7 +86,7 @@ def test_dedupe_state_carries_across_chunks():
     state the dedupe silently degrades to per-chunk, which is invisible in the output
     and only shows up as an inflated message rate.
     """
-    row = ["25/08/2026 00:00:00", 245043000, 54.6, 11.3, "Class A"]
+    row = ["25/08/2026 00:00:00", 999043000, 54.6, 11.3, "Class A"]
     seen: set[int] = set()
     stats = IngestStats()
     first = drop_duplicate_receptions(_frame([row]), seen, stats)
@@ -101,7 +101,7 @@ def test_dedupe_state_carries_across_chunks():
 
 def test_landmine_2_aton_rows_are_excluded_and_counted():
     frame = add_report_time(_frame([
-        ["25/08/2026 10:00:00", 245043000, 54.6, 11.3, "Class A"],
+        ["25/08/2026 10:00:00", 999043000, 54.6, 11.3, "Class A"],
         ["25/08/2026 10:00:00", 992111111, 54.6, 11.3, "AtoN"],
     ]))
     stats = IngestStats()

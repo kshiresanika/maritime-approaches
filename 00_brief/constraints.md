@@ -19,7 +19,7 @@
 
 ## Commercial / IP
 8. Read the event's IP and open-sourcing terms before the first commit.
-9. No disclosure of the mothership/child-drone architecture or FARU.
+9. No disclosure of prior unpublished architecture work. Clean-room only.
 10. Pre-incorporation. Nothing that triggers company registration.
 
 ## Technical

@@ -73,24 +73,32 @@ MEASURED: WHAT CONFIDENCE IS ACTUALLY WORTH, given lane C's arithmetic
 --------------------------------------------------------------------------------
 
 Computed by running consistency.py's own `_probability_to_sigma` against its own
-thresholds (`min_class_confidence=0.60`, `min_report_sigma=2.0`,
+thresholds (`min_class_confidence=0.60`, `class_min_report_sigma=3.5` nats,
 `confusable_class_discount=0.5`):
 
-        VLM confidence   significance   does a class mismatch fire?
-             0.90            1.282                no
-             0.95            1.645                no
-             0.97            1.881                no
-             0.9772          2.000                threshold
-             0.98            2.054                YES
-             0.99            2.327                YES
+        VLM confidence   significance (nats)   does a class mismatch fire?
+             0.90                2.197                   no
+             0.95                2.944                   no  <- the ceiling
+             0.97                3.476                   no
+             0.9707              3.500                   threshold
+             0.98                3.892                   YES
+             0.99                4.595                   YES
 
-    MINIMUM CONFIDENCE FOR A CLASS MISMATCH TO FIRE AT ALL: 0.9772
+    MINIMUM CONFIDENCE FOR A CLASS MISMATCH TO FIRE AT ALL: 0.9707
+
+    These are LOG-ODDS, ln(p/(1-p)), in nats -- not sigmas. Lane C replaced the normal
+    quantile on 2026-08-29 because it made the class check mathematically incapable of
+    ever firing. This table previously still carried the old sigma figures (0.95 ->
+    1.645, threshold 0.9772) against a 2.0 floor, which was the arithmetic of a mapping
+    that no longer existed.
 
 And the result that should shape the prompt more than any other:
 
-    A CONFUSABLE PAIR CAN NEVER FIRE. Maximum reachable significance is 3.719 sigma
-    (confidence is clipped at 0.9999); halved by the confusable discount that is 1.860,
-    against a 2.0 floor. cargo-vs-tanker, tug-vs-small_craft, fishing-vs-small_craft,
+    A CONFUSABLE PAIR CAN NEVER FIRE. Maximum reachable significance is 6.9068 nats
+    (consistency._probability_to_sigma clamps p at 0.999, NOT 0.9999); halved by the
+    confusable discount that is 3.4534, against the 3.5 nat class floor -- a margin of
+    0.0466. Thin, but a hard structural bound rather than a tuning coincidence: it holds
+    for every input the function accepts. cargo-vs-tanker, tug-vs-small_craft, fishing-vs-small_craft,
     tug-vs-fishing and passenger-vs-cargo therefore CANNOT produce a class mismatch at
     any confidence whatsoever.
 
@@ -109,8 +117,8 @@ correlates loosely with correctness and is, for vision models on out-of-distribu
 imagery, systematically overconfident.
 
 So until an agreement rate has been MEASURED on hand-labelled crops, every confidence is
-capped at `UNCALIBRATED_CONFIDENCE_CEILING = 0.95`, which yields 1.645 sigma — below the
-2.0 floor. The observation still flows through the pipeline, still appears in the
+capped at `UNCALIBRATED_CONFIDENCE_CEILING = 0.95`, which yields ln(0.95/0.05) = 2.944
+nats — below lane C's 3.5 nat class floor. The observation still flows through the pipeline, still appears in the
 evidence record, and still cannot raise a class mismatch on its own.
 
 This is the same pattern as geometry.py's `yaw_uncertainty_deg=180.0` for an unsurveyed
@@ -530,7 +538,7 @@ def effective_confidence(raw_confidence: float | None,
     """Cap a self-reported confidence at what has actually been demonstrated.
 
     With no calibration the ceiling is UNCALIBRATED_CONFIDENCE_CEILING (0.95), which
-    lane C's arithmetic turns into 1.645 sigma — below its 2.0 floor. The observation
+    lane C's arithmetic turns into 2.944 nats — below its 3.5 nat class floor. The observation
     therefore reaches the evidence record and CANNOT raise a class mismatch on its own.
 
     There is deliberately no argument to raise the ceiling by hand. The only way past it
@@ -881,10 +889,18 @@ def format_score_report(rep: dict) -> str:
               f"{rep['ceiling']:.4f}",
               f"  -> lane C significance {z:.3f} nats against its "
               f"{LANE_C_CLASS_FLOOR_NATS:.1f} nat class floor",
-              f"  -> a class mismatch {'CAN' if z >= 2.0 else 'CANNOT'} fire with this sample",
+              f"  -> a class mismatch "
+              f"{'CAN' if z >= LANE_C_CLASS_FLOOR_NATS else 'CANNOT'} fire with "
+              f"this sample",
               ""]
-    if z < 2.0:
-        need = _n_needed_for_ceiling(0.9772)
+    # BOTH comparisons below test NATS against lane C's NATS floor. They previously
+    # tested against 2.0 -- the old SIGMA floor, from a mapping lane C had already
+    # replaced -- so this report could tell an operator a class mismatch CAN fire while
+    # consistency.check_class was still suppressing it. A console that asserts the
+    # opposite of the pipeline is worse than a console that says nothing.
+    if z < LANE_C_CLASS_FLOOR_NATS:
+        # p required to clear the floor: 1/(1+e^-3.5) = 0.9707, NOT the old 0.9772.
+        need = _n_needed_for_ceiling(_CLASS_FIRING_PROBABILITY)
         lines += [
             "THAT IS THE CORRECT OUTCOME, NOT A FAILURE. It means the class observation",
             "is too weak to accuse anyone on its own, which is what lane C intends:",
@@ -910,6 +926,13 @@ def _pct(v):
 # this module never imports it; this exists only so the scorer can tell the operator
 # what a given ceiling implies. IF LANE C MOVES ITS FLOOR, MOVE THIS.
 LANE_C_CLASS_FLOOR_NATS = 3.5
+
+# The confidence a class observation must reach before it can raise a mismatch at all,
+# derived from the floor above rather than written down beside it: p = 1/(1+e^-3.5).
+# Deriving it means the two cannot drift apart, which is how the previous pair (2.0 and
+# 0.9772) survived a change to the mapping underneath them.
+import math as _math
+_CLASS_FIRING_PROBABILITY = 1.0 / (1.0 + _math.exp(-LANE_C_CLASS_FLOOR_NATS))
 
 
 def _sigma_for(p: float) -> float:
@@ -1060,7 +1083,8 @@ def cmd_observe(args) -> int:
     if calibration is None:
         print(f"NO CALIBRATION FILE. Confidence capped at "
               f"{UNCALIBRATED_CONFIDENCE_CEILING} -> "
-              f"{_sigma_for(UNCALIBRATED_CONFIDENCE_CEILING):.3f} sigma. "
+              f"{_sigma_for(UNCALIBRATED_CONFIDENCE_CEILING):.3f} nats "
+              f"(floor {LANE_C_CLASS_FLOOR_NATS}). "
               "No class mismatch can fire. This is by design; run --score to earn a "
               "higher ceiling.")
 

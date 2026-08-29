@@ -165,8 +165,10 @@ here:
    waterline, aspect 2.8, persisting 14 frames, at these thresholds" survives a
    courtroom. "A network assigned 0.87" does not. Criterion 4 asks for evidence-grade
    output; an explainable detector is *structurally* better at it.
-3. **It runs on the sensor.** Classical CV does 30 FPS on a Raspberry Pi. YOLOv8n does a
-   few.
+3. **It runs on the sensor.** Classical CV is far cheaper per frame than YOLOv8n on a
+   Pi — MOG2 is a per-pixel operation with no neural network at all. The actual Pi
+   frame rate is **UNMEASURED**; nothing has run on the Pi. See
+   `04_demo/edge_benchmark.md`, which is the instrument and is still empty.
 
 ### 5.2 The decision register
 
@@ -180,10 +182,10 @@ here:
 | Association **never judges honesty** | reject implausible pairs during matching | A spoofer is exactly where it says it is, so it pairs perfectly. Filtering "wrong-looking" pairs would discard the spoof before anything could examine it. |
 | Deterministic **rationale template** by default | always call the LLM | Works offline, cannot hallucinate a fact absent from the record, and keeps the whole project runnable with no AI. |
 | **Classical CV** on the sensor | YOLOv8n | See 5.1 — kill-risk, explainability, frame rate. |
-| Confidence **saturates at 0.97** | allow 1.0 | The tool cannot exclude a systematic error it does not know about; a mis-surveyed pose rotates every bearing equally and looks exactly like confidence. The ceiling is a statement about the method. |
+| MATCH confidence **capped at 0.95 x evidential coverage** | allow 1.0 | The tool cannot exclude a systematic error it does not know about; a mis-surveyed pose rotates every bearing equally and looks exactly like confidence. The ceiling is a statement about the method. |
 | Deferred verdicts are **damped, not dropped** | hide low-confidence findings | Hiding the uncertain cases from the operator is the opposite of criterion 4. |
 | Prioritizer includes an **actionability** term | rank by severity alone | A 9σ spoofer two hours away ranks below a 5σ loiterer six miles out. Suspicion is a property of a contact; priority is a property of a contact, an asset and a clock. |
-| Web app is **stdlib + zero network** | FastAPI + Leaflet | A demo that needs `pip install` or a CDN is one venue-wifi failure from not existing. |
+| Web app **has a stdlib + zero-network fallback** | FastAPI + Leaflet only | A demo that needs `pip install` or a CDN is one venue-wifi failure from not existing. |
 
 ### 5.3 Dead logic found and removed
 
@@ -270,7 +272,10 @@ via `sys.path` — see `tests/conftest.py`.
 
 ## 9. Run the demo — two commands, no downloads
 
-A fully synthetic 8-vessel scenario is committed, so this works on a fresh clone:
+A fully synthetic 16-vessel scenario is committed, so this works on a fresh clone.
+(It was widened from 8 to 16 because the harness warned it had no out-of-view vessel
+to build a coverage-hole control from, and a scene with no controls cannot measure a
+false-positive rate.)
 
 ```bash
 python 04_demo/make_synthetic_eo.py --ais 04_demo/demo_scenario.csv --out 04_demo/out/scene01

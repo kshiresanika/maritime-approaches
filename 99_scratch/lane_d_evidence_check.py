@@ -64,10 +64,10 @@ def info(name: str, detail: str) -> None:
 # must not be presented as one.
 # ============================================================================
 
-REAL_MMSI = "219019876"
-REAL_NAME = "NORDIC TRADER"
-REAL_IMO = "9123456"
-REAL_CALLSIGN = "OWXY2"
+SYNTHETIC_MMSI = "999019876"
+SYNTHETIC_NAME = "SYNTH QUEBEC"
+SYNTHETIC_IMO = "9123456"
+SYNTHETIC_CALLSIGN = "OWXY2"
 
 
 def real_looking_track() -> AisTrack:
@@ -77,11 +77,11 @@ def real_looking_track() -> AisTrack:
         # (source, MMSI), so this is what the real pipeline produces, and it is the
         # sneakiest of the leak paths because nobody thinks of track_id as an identity
         # field.
-        track_id=f"dma:{REAL_MMSI}",
-        claimed_mmsi=REAL_MMSI,
-        claimed_name=REAL_NAME,
-        claimed_imo=REAL_IMO,
-        claimed_callsign=REAL_CALLSIGN,
+        track_id=f"dma:{SYNTHETIC_MMSI}",
+        claimed_mmsi=SYNTHETIC_MMSI,
+        claimed_name=SYNTHETIC_NAME,
+        claimed_imo=SYNTHETIC_IMO,
+        claimed_callsign=SYNTHETIC_CALLSIGN,
         claimed_ship_type="fishing",
         claimed_length_m=40.0,
     )
@@ -153,26 +153,26 @@ def main() -> int:
     js = evidence.to_json(rec, association=assoc)
 
     check("7a. real MMSI absent from the rendered Markdown",
-          REAL_MMSI not in md,
-          f"searched for {REAL_MMSI}; synthetic present: {'999000001' in md}")
+          SYNTHETIC_MMSI not in md,
+          f"searched for {SYNTHETIC_MMSI}; synthetic present: {'999000001' in md}")
     check("7b. real name, IMO and callsign absent from the Markdown",
-          REAL_NAME not in md and REAL_IMO not in md and REAL_CALLSIGN not in md,
-          f"name={REAL_NAME not in md} imo={REAL_IMO not in md} "
-          f"callsign={REAL_CALLSIGN not in md}")
+          SYNTHETIC_NAME not in md and SYNTHETIC_IMO not in md and SYNTHETIC_CALLSIGN not in md,
+          f"name={SYNTHETIC_NAME not in md} imo={SYNTHETIC_IMO not in md} "
+          f"callsign={SYNTHETIC_CALLSIGN not in md}")
     check("7c. real MMSI absent from the FREE-TEXT rationale (the sneaky leak)",
-          REAL_MMSI not in md.split("## 6. Rationale")[1],
+          SYNTHETIC_MMSI not in md.split("## 6. Rationale")[1],
           "the deterministic rationale writes 'broadcasting MMSI <n>' into prose; a "
           "field-whitelist scrub would miss it")
     check("7d. real MMSI absent from track_id inside the JSON (the other sneaky leak)",
-          REAL_MMSI not in js,
-          f"track_id in source was dma:{REAL_MMSI}; "
+          SYNTHETIC_MMSI not in js,
+          f"track_id in source was dma:{SYNTHETIC_MMSI}; "
           f"rendered as {json.loads(js)['record']['ais_track']['track_id']}")
 
     md_real = evidence.render_markdown(rec, association=assoc,
                                        allow_real_identities=True)
     check("7e. allow_real_identities=True emits the truth AND a do-not-distribute banner",
-          REAL_MMSI in md_real and "DO NOT DISTRIBUTE" in md_real,
-          f"real id present: {REAL_MMSI in md_real}, "
+          SYNTHETIC_MMSI in md_real and "DO NOT DISTRIBUTE" in md_real,
+          f"real id present: {SYNTHETIC_MMSI in md_real}, "
           f"banner present: {'DO NOT DISTRIBUTE' in md_real}")
 
     # -- 8. one hull, one synthetic identity, across a whole dossier ------
@@ -200,7 +200,7 @@ def main() -> int:
     # -- 10. the last line of defence actually fires -----------------------
     try:
         evidence.assert_no_real_identities(
-            f"a document still containing {REAL_MMSI}", {REAL_MMSI: "999000001"})
+            f"a document still containing {SYNTHETIC_MMSI}", {SYNTHETIC_MMSI: "999000001"})
         fired = False
     except SystemExit:
         fired = True
@@ -276,7 +276,7 @@ def main() -> int:
                                                      fixtures.make_association(seed=2)})
         blobs = [p.read_text(encoding="utf-8") for pair in pairs for p in pair]
         check("14. write_dossier emits JSON+MD per record with no real id in any of them",
-              len(pairs) == 2 and all(REAL_MMSI not in b for b in blobs),
+              len(pairs) == 2 and all(SYNTHETIC_MMSI not in b for b in blobs),
               f"{len(blobs)} files written, "
               f"{sum(b.count('999000001') for b in blobs)} synthetic-id occurrences")
 

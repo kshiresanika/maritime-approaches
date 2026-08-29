@@ -540,7 +540,10 @@ def check_class(
         observed_field="EoContact.observed_class (silhouette)",
         unit="class_label",
         delta=None,                      # categorical. contracts.py: None, not zero.
-        tolerance=round(tol.min_report_sigma, 2),
+        # The CLASS floor, not the general one. This field is rendered verbatim into
+        # the exported case file, so stamping 2.0 here told a reader the finding
+        # cleared 2.0 when check_class actually required 3.5.
+        tolerance=round(tol.class_min_report_sigma, 2),
         significance=round(sig, 2),
         explained_by_staleness=False,
         severity=severity,
