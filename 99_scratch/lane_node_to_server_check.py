@@ -3,7 +3,7 @@
 99_scratch/lane_node_to_server_check.py — the whole live path, for real.
 
 Starts the shore station on a port, launches 04_demo/pi_sensor.py as a SUBPROCESS
-against the rendered scene video, and then asks the only questions that matter:
+against the DETECTOR cut of the rendered scene video, and then asks the only questions that matter:
 
   * did the node's contacts reach the server (HTTP 200, not 422)?
   * were they PROMOTED, or accepted-and-ignored because the active source did not
@@ -42,7 +42,7 @@ s = socket.socket(); s.bind(("127.0.0.1", 0)); PORT = s.getsockname()[1]; s.clos
 app = create_app(scene_dir=SCENE, web_dir=ROOT / "03_src/web",
                  audit_path=Path("/tmp/node_e2e_audit.jsonl"),
                  mjpeg_url=None, camera_index=None, allow_real_identities=False,
-                 node_stale_after_s=8.0, video_source=str(SCENE / "scene.mp4"),
+                 node_stale_after_s=8.0, video_source=str(SCENE / "scene_detector.mp4"),
                  initial_source="VIDEO_STREAM")
 srv = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=PORT, log_level="error"))
 threading.Thread(target=srv.run, daemon=True).start()
@@ -62,7 +62,7 @@ for _ in range(80):
 print(f"\n=== shore station up on {PORT}; launching the node ===")
 proc = subprocess.Popen(
     [sys.executable, "-u", str(ROOT / "04_demo/pi_sensor.py"),
-     "--source", str(SCENE / "scene.mp4"), "--loop",
+     "--source", str(SCENE / "scene_detector.mp4"), "--loop",
      "--pose", str(SCENE / "camera_pose_SCENE.json"), "--scale", "1",
      "--node-id", "sensor-01", "--interval", "1.0",
      "--post", f"http://127.0.0.1:{PORT}/api/contacts",

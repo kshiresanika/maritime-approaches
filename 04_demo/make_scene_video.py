@@ -297,30 +297,40 @@ def render(manifest: dict, contacts: list[dict], out: Path, *,
     # where nothing needs measuring, and this is it — the video was DRAWN from this
     # pose, so the camera that "shot" it IS this pose, by construction. Written beside
     # the video so the two cannot be separated and mismatched later.
+    # WRITTEN FOR THE DETECTOR CUT ONLY, and that is not tidiness.
+    # Both cuts would write the same filename with a DIFFERENT time_lapse_factor, so
+    # whichever ran last would leave the other cut's pose lying about its own time
+    # base. Nothing reads a pose for the recorded cut anyway — no sensor node runs on
+    # it; the console draws the scene's own contacts. One writer, one meaning.
     pose_out = out.parent / "camera_pose_SCENE.json"
-    pose_out.write_text(json.dumps({
-        "pose_ref": pose.get("pose_ref", "scene"),
-        "yaw_deg_true": pose["boresight_deg_true"],
-        "hfov_deg": pose["hfov_deg"],
-        "yaw_uncertainty_deg": pose.get("yaw_uncertainty_deg", 2.0),
-        "lat_deg": pose["lat_deg"],
-        "lon_deg": pose["lon_deg"],
-        "height_m": pose.get("height_m", 25.0),
-        "image_width_px": W,
-        "image_height_px": H,
-        "hfov_source": "EXACT — this video was rendered from this pose",
-        "time_lapse_factor": time_lapse,
-        "note": ("Emitted by make_scene_video.py alongside scene.mp4. Every value is "
-                 "copied from scene_manifest.json, the pose make_synthetic_eo projected "
-                 "the AIS truth through. NOTHING HERE IS MEASURED FROM A REAL CAMERA, "
-                 "because there is no real camera: the imagery is a rendering. Valid "
-                 "for that video and nothing else. NOTE time_lapse_factor: the video "
-                 "runs in compressed scene time, so any SPEED the detector infers from "
-                 "frame-to-frame motion is that many times too fast. Bearings and "
-                 "ranges are unaffected — they are per-frame geometry. Point the node "
-                 "at real footage and you must measure hfov_deg yourself; see "
-                 "camera_pose_TEMPLATE.json."),
-    }, indent=2) + "\n", encoding="utf-8")
+    if mode == "detector":
+        pose_out.write_text(json.dumps({
+            "pose_ref": pose.get("pose_ref", "scene"),
+            "yaw_deg_true": pose["boresight_deg_true"],
+            "hfov_deg": pose["hfov_deg"],
+            "yaw_uncertainty_deg": pose.get("yaw_uncertainty_deg", 2.0),
+            "lat_deg": pose["lat_deg"],
+            "lon_deg": pose["lon_deg"],
+            "height_m": pose.get("height_m", 25.0),
+            "image_width_px": W,
+            "image_height_px": H,
+            "hfov_source": "EXACT — this video was rendered from this pose",
+            # Only the detector cut is time-lapsed. Writing 60 beside a static render
+            # would tell a reader to divide speeds that were never multiplied.
+            "time_lapse_factor": (time_lapse if mode == "detector" else 1.0),
+            "rendered_for": mode,
+            "note": ("Emitted by make_scene_video.py alongside scene.mp4. Every value is "
+                     "copied from scene_manifest.json, the pose make_synthetic_eo projected "
+                     "the AIS truth through. NOTHING HERE IS MEASURED FROM A REAL CAMERA, "
+                     "because there is no real camera: the imagery is a rendering. Valid "
+                     "for that video and nothing else. NOTE time_lapse_factor: the "
+                     "DETECTOR cut runs in compressed scene time, so any SPEED inferred "
+                     "from frame-to-frame motion in it is that many times too fast. "
+                     "Bearings and ranges are unaffected — they are per-frame geometry. "
+                     "The RECORDED cut is static and has no time lapse. Point the node "
+                     "at real footage and you must measure hfov_deg yourself; see "
+                     "camera_pose_TEMPLATE.json."),
+        }, indent=2) + "\n", encoding="utf-8")
 
     moving = sum(1 for d in drifts if abs(d) > 1.0)
     print(f"  MODE: {mode}" + ("  — hulls STATIC at each contact's own bbox_px, so the "
@@ -345,9 +355,13 @@ def render(manifest: dict, contacts: list[dict], out: Path, *,
         print(f"  horizon y={horizon} (scenery); hull boxes are the contacts' own "
               f"bbox_px, untouched — the console draws the same numbers")
     print(f"  sea is STATIC by design: MOG2 detects what moves, so only hulls do")
-    print(f"wrote {pose_out}")
-    print(f"  hfov={pose['hfov_deg']:g}  yaw={pose['boresight_deg_true']:.2f}T  "
-          f"height={pose.get('height_m', 25.0):g} m — EXACT for this video")
+    if mode == "detector":
+        print(f"wrote {pose_out}")
+        print(f"  hfov={pose['hfov_deg']:g}  yaw={pose['boresight_deg_true']:.2f}T  "
+              f"height={pose.get('height_m', 25.0):g} m — EXACT for this video")
+    else:
+        print("  no pose sidecar: nothing reads one for the recorded cut — no sensor "
+              "node runs on it, the console draws the scene's own contacts")
     if mode == "recorded":
         print(f"\nshow it (T1 — the recorded scene IS the picture; no sensor node):\n"
               f"  python3 03_src/main.py --video {out} --loop")

@@ -37,52 +37,111 @@ One decoder, one clock, one observation.
 
 ---
 
-## 2. Run it — three commands, pick one
+## 2. Run it — the commands, and the three flags that decide everything
 
-**`--pose` is not optional.** The node refuses to start on a pose whose `hfov_deg` is
-0, and it is right to: every bearing it emits is wrong until that number is measured.
-Both shipped poses (`camera_pose_TABLETOP.json`, `camera_pose_TEMPLATE.json`) are
-unfilled templates. `make_scene_video.py` writes a filled one beside its video.
+**Rewritten 2026-08-29 after `--live` gating and the two scene cuts. The commands in the
+previous revision of this section start a detector you do not want and pass a pose that
+is now ignored.**
 
-| You have | Command |
-|---|---|
-| **Nothing yet** (no footage) | `python3 04_demo/make_scene_video.py`<br/>`python3 03_src/main.py --video 04_demo/out/scene01/scene.mp4 --loop \`<br/>`    --pose 04_demo/out/scene01/camera_pose_SCENE.json --scale 1` |
-| **A clip** (`.mp4`, `.mov`, `.mkv`) | `python3 03_src/main.py --video <clip> --loop --scale 1 --pose <measured pose.json>` |
-| **A network stream** | `python3 03_src/main.py --video "https://host/live/index.m3u8" --scale 1 --pose <measured pose.json>` |
-| **A lens on this machine** | `python3 03_src/main.py --camera 0 --scale 20 --pose <measured pose.json>` |
+### 2.0 The three flags, because everything below follows from them
 
-Then open `http://127.0.0.1:8000/`. Everything else — preflight, AIS replay, fusion,
-server, browser — is unchanged.
+| Flag | What it does | What it does NOT do |
+|---|---|---|
+| `--video <file\|url>` | Puts imagery on the console. The server decodes it and serves it on `/stream`. | **Does not start a detector.** It is a picture, not an observation. |
+| `--live` | Starts `pi_sensor.py` on `--video`/`--camera` **and promotes it** — `initial_source` becomes `VIDEO_STREAM` (or `MAC_CAMERA`). The node then publishes the frame it detected on, so boxes and imagery are one observation. | Nothing else. Without it the authority stays `RECORDED`. |
+| `--pose <json>` | The camera model every bearing is computed through. **Only read when a node runs**, i.e. only with `--live`. | Its default is `04_demo/camera_pose_TABLETOP.json`, whose `hfov_deg` is **0.0**. Pass that to a node and it refuses to start, correctly — a zero HFOV makes every bearing wrong. |
 
-For real footage you must measure the HFOV: point the camera at two landmarks whose
-bearings you know, put each at a frame edge, and the difference between them **is** the
-horizontal field of view. `camera_pose_TEMPLATE.json` says so too. Add
-`"hfov_source": "..."` to any pose and the node prints its provenance every run — and
-warns loudly if it says ASSUMED.
+That pairing is the whole of the fix: `--video` alone used to launch a node anyway, which
+then refused over the unfilled tabletop pose and printed an alarming `hfov_deg` error
+into a T1 demo that was working perfectly.
 
-### The video shows even when the node does not
-
-`/stream` serves the **relay** while a node is publishing and **decodes `--video`
-itself** when one is not, switching between them inside the same response. So a node
-that refuses to start (a bad pose, a missing file) no longer means an empty pane — you
-get the video, and `/health` says which of the two you are watching.
-
-`--loop` matters for a file: without it the node exits at the end of the clip and the
-console correctly reports a dead sensor, mid-pitch.
-
-### YouTube and other watch pages
-
-A YouTube URL is a **web page**, not a stream; OpenCV cannot open it. Resolve it first:
+### 2.1 Preconditions — check once, before the room fills
 
 ```bash
-yt-dlp -g "https://www.youtube.com/watch?v=..."        # prints a direct media URL
-python3 03_src/main.py --video "<that URL>" --scale 1
+cd ~/Desktop/MaritimeApproaches
+source .venv/bin/activate
+
+# The WebSocket transport uvicorn does NOT bring with it. Without one, uvicorn answers
+# 404 to the /ws upgrade — indistinguishable from a missing route — and the console
+# silently degrades to 2 s polling. `pip install uvicorn` alone does not supply it.
+python -c "import websockets; print('ws OK', websockets.__version__)" \
+  || pip install websockets
+
+# The scene assets. MEASURED 2026-08-29 (opencv in the Linux VM; decoding is
+# platform-independent, so it carries to the Mac):
+#   scene01/scene.mp4           1920x1080  12.00 fps  360 frames  30.0 s loop
+#   scene01/scene_detector.mp4  1920x1080  12.00 fps  360 frames  30.0 s loop
+#   scene02/scene.mp4           1920x1080  12.00 fps  360 frames  30.0 s loop
+# First frame of each decodes and survives a JPEG encode with valid SOI/EOI markers,
+# which is the exact byte path /stream serves.
+ls -l 04_demo/out/scene01/scene.mp4 04_demo/out/scene01/scene_detector.mp4 \
+      04_demo/out/scene01/camera_pose_SCENE.json
 ```
 
-Resolved URLs are short-lived and usually IP-bound. **Do not build the pitch on one** —
-re-resolve immediately before the demo, and keep a downloaded clip as the fallback.
+If any of the three is missing, regenerate — **and note the two cuts are two runs**:
 
----
+```bash
+python3 04_demo/make_scene_video.py --for recorded   # scene.mp4          (static hulls)
+python3 04_demo/make_scene_video.py --for detector   # scene_detector.mp4 + the pose
+```
+
+Only the **detector** cut writes `camera_pose_SCENE.json`. Both cuts would write the same
+filename with a different `time_lapse_factor`, so whichever ran last would leave the other
+lying about its own time base. Nothing reads a pose for the recorded cut — no node runs
+on it.
+
+### 2.2 The commands
+
+| Tier | Command | What lands on screen |
+|---|---|---|
+| **T1 — RECORDED. Pitch this one.** | `python3 03_src/main.py --video 04_demo/out/scene01/scene.mp4 --loop` | The scene's own rendering, with the recorded scene's ranked contacts drawn over it. No detector, no pose, nothing that can refuse to start. `/health` says *"scene rendering: this imagery was rendered from the very contacts drawn over it."* |
+| **T1-LIVE — the real detector, on the rendered scene** | `python3 03_src/main.py --video 04_demo/out/scene01/scene_detector.mp4 --loop --live \`<br>`  --pose 04_demo/out/scene01/camera_pose_SCENE.json --scale 1` | MOG2 actually detects; the node publishes each frame it ran on; `/stream` relays it. `/health` says *"frame-synchronised: the node published the frame it detected on."* |
+| **A lens on this machine** | `python3 03_src/main.py --camera 0 --live --scale 20 --pose <a pose you MEASURED>` | Live camera. `--scale 20` is the tabletop 1 cm = 20 m convention. |
+| **A network stream** | `python3 03_src/main.py --video "https://host/live/index.m3u8" --live --scale 1 --pose <measured>` | Live imagery. Read §5 before pointing this at anything public. |
+| **Scene 02** | `python3 03_src/main.py --scene 04_demo/out/scene02 --video 04_demo/out/scene02/scene.mp4 --loop` | **Recorded path only.** scene02 has neither a detector cut nor a pose sidecar, so `--live` has nothing to run on. |
+
+Then open `http://127.0.0.1:8000/`. `main.py` opens it for you once `/health` answers —
+it polls rather than opening immediately, because landing on connection-refused reads on
+stage as a broken tool.
+
+### 2.3 Confirm it is actually working — three scripts, then one curl
+
+These are the confirmation. All three run a **real uvicorn on a real port**; nothing in
+them is stubbed, which is the whole reason they exist — every earlier check called the
+backend object directly, and that is how a route returning 422 to every POST survived.
+
+```bash
+# Generators in isolation: looping, pacing, JPEG validity, and that a stopped relay
+# ENDS rather than freezing.               expected: 17/17
+python3 99_scratch/lane_video_check.py
+
+# The video pane through a real server: decode, relay hand-off, the "none configured"
+# string, scene-rendering vs UNRELATED IMAGERY.   expected: 15/15
+python3 99_scratch/lane_video_e2e.py
+
+# pi_sensor.py as a SUBPROCESS against a real server: contacts arrive (200, not 422),
+# are PROMOTED, frames relay, /stream switches.   expected: 8/8
+python3 99_scratch/lane_node_to_server_check.py
+```
+
+Each prints its own PASS/FAIL lines and ends with `ALL CHECKS PASSED` or `FAILED: n`.
+
+With the rig running, one call states the truth about the pane:
+
+```bash
+curl -s http://127.0.0.1:8000/health | python3 -m json.tool | sed -n '/"source"/,/}/p'
+```
+
+| `video_sync` begins | Meaning | Correct for |
+|---|---|---|
+| `scene rendering:` | Imagery is this scene's own rendering; the boxes do belong to the frame beneath them. Synthetic — no camera observed it. | **T1** |
+| `frame-synchronised:` | The node published the frame it detected on. One decoder, one clock. | **T1-LIVE** |
+| `reference imagery:` | Decoded independently of the detector — approximately the same picture, not the same frame. | acceptable |
+| `UNRELATED IMAGERY:` | **Stop.** The contacts come from the RECORDED scene, not this video; every box is in the wrong place. Switch the source to `VIDEO_STREAM` — or drop `--live` and use the scene's own cut. | never |
+| `no imagery` | No node publishing and no `--video` given. | never, on stage |
+
+`source.video` is the other half: `none configured` · `decoding <src>` · `relayed from
+node <id>`.
 
 ## 3. Where the changes are
 

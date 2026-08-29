@@ -152,11 +152,27 @@ check("/stream returns 503", st == 503, str(st))
 s.stop()
 
 print("\n=== 4. THE QUIET LIE: imagery present, RECORDED is the authority ===")
+# Two cases, and the distinction is the whole point. The console draws the RECORDED
+# scene's boxes over whatever imagery /stream serves. When that imagery is the scene's
+# OWN rendering the boxes do belong to it; when it is any other video they do not, and
+# only one of those may be presented without a warning.
 s = Server(video_source=str(VIDEO), initial_source="RECORDED")
 sync = s.get_json("/health")["source"]["video_sync"]
-check("video_sync warns UNRELATED IMAGERY", sync.startswith("UNRELATED IMAGERY"), sync[:60])
+check("the scene's own rendering is NOT called unrelated",
+      sync.startswith("scene rendering"), sync[:70])
+check("...and says plainly that no camera observed it", "no camera" in sync.lower())
+s.stop()
+
+import shutil
+OUTSIDE = Path("/tmp/lane_e2e_outside.mp4")
+shutil.copy(VIDEO, OUTSIDE)
+s = Server(video_source=str(OUTSIDE), initial_source="RECORDED")
+sync = s.get_json("/health")["source"]["video_sync"]
+check("a video from ANYWHERE ELSE warns UNRELATED IMAGERY",
+      sync.startswith("UNRELATED IMAGERY"), sync[:70])
 check("...and names the fix", "VIDEO_STREAM" in sync)
 s.stop()
+OUTSIDE.unlink(missing_ok=True)
 
 print("\n" + "=" * 70)
 print("ALL CHECKS PASSED" if not FAILED else f"FAILED: {FAILED}")

@@ -1201,6 +1201,37 @@ class ConsoleBackend:
             return ack
 
     # ------------------------------------------------------------------- evidence
+    def evidence_record(self, record_id: str):
+        """
+        Look a record up by record_id, falling back to verdict_id.
+
+        FACTORED OUT rather than copied into the new document route. The fallback is a
+        real behaviour — the console shows verdicts, and an operator reading an id off
+        the screen should not have to know which of the two identifiers a route wanted —
+        and two copies of it would drift the first time one was fixed.
+        """
+        record = self._records_by_id.get(record_id)
+        if record is None:
+            for r in self._records:
+                if r.verdict.verdict_id == record_id:
+                    return r
+            raise KeyError(record_id)
+        return record
+
+    def evidence_markdown(self, record_id: str, *, allow_real: bool) -> str:
+        """
+        The READABLE case file, through the SAME shared anonymiser as the JSON.
+
+        Sharing self._anon is not tidiness: Anonymiser numbers hulls by first-seen
+        order, so a fresh instance per request would hand every exported document the
+        same synthetic identity (999000001 / VESSEL 001) regardless of which hull it
+        described. The document and the screen would then disagree about who the vessel
+        was, with nothing raising anywhere. See evidence_payload's note.
+        """
+        return evidence_mod.render_markdown(
+            self.evidence_record(record_id), anonymiser=self._anon,
+            association=None, allow_real_identities=allow_real)
+
     def evidence_payload(self, record_id: str, *, allow_real: bool) -> dict[str, Any]:
         """
         The case file for one record, pseudonymised by default.
@@ -1353,6 +1384,131 @@ def _mjpeg_passthrough(url: str, *, chunk: int = 8192) -> Iterator[bytes]:
         print(f"[server] /stream passthrough ended: {type(exc).__name__}: {exc}",
               file=sys.stderr)
         return
+
+
+_CASE_CSS = """
+:root{color-scheme:dark}
+body{background:#0b0e13;color:#e8eef5;font:15px/1.6 ui-sans-serif,-apple-system,Segoe UI,Roboto,sans-serif;
+     margin:0;padding:40px clamp(16px,5vw,64px);max-width:60rem}
+h1{font-size:1.7rem;letter-spacing:.02em;margin:0 0 .2em;border-bottom:2px solid #2a3644;padding-bottom:.3em}
+h2{font-size:1.15rem;letter-spacing:.06em;text-transform:uppercase;color:#7fd4ff;margin:2.1em 0 .5em}
+h3{font-size:1rem;color:#b9c8d6;margin:1.5em 0 .4em}
+table{border-collapse:collapse;width:100%;margin:.8em 0;font-size:.93rem}
+th,td{border:1px solid #2a3644;padding:7px 11px;text-align:left;vertical-align:top}
+th{background:#151c26;color:#9fc2ff;font-weight:700}
+tr:nth-child(even) td{background:#0f141b}
+code{background:#151c26;padding:1px 5px;border-radius:3px;font-size:.9em}
+strong{color:#fff}
+hr{border:0;border-top:1px solid #2a3644;margin:2em 0}
+ul{padding-left:1.3em}li{margin:.25em 0}
+a{color:#7fd4ff}
+em{color:#b9c8d6;font-style:italic}
+blockquote{margin:1.1em 0;padding:12px 16px;border-left:4px solid #ffd166;
+           background:#1a1710;color:#f0e6d2}
+.bar{position:sticky;top:0;background:#0b0e13;border-bottom:1px solid #2a3644;
+     padding:10px 0 12px;margin:-40px 0 24px;display:flex;gap:14px;flex-wrap:wrap;
+     font:700 12px/1 ui-monospace,Menlo,monospace;letter-spacing:.06em;text-transform:uppercase}
+.bar a{border:1px solid #2a3644;border-radius:999px;padding:7px 13px;text-decoration:none}
+.bar a:hover{border-color:#7fd4ff}
+@media print{.bar{display:none}body{background:#fff;color:#000;max-width:none}
+  h2{color:#004b6e}th{background:#eee;color:#000}td,th{border-color:#999}}
+"""
+
+
+def _md_to_html(md: str) -> str:
+    """
+    Just enough Markdown for a case file: headings, tables, lists, rules, bold, code.
+
+    NO LIBRARY, deliberately. The console already refuses to depend on the network for
+    its map; adding a markdown dependency to render a document the server already has
+    in memory would be the same mistake in a new place. The subset is small because
+    render_markdown() emits a small subset — and if it ever emits something this does
+    not handle, the text still appears, just unstyled. Degrading to plain text is the
+    right failure for a document whose CONTENT is the point.
+    """
+    import html as _html
+    import re as _re
+
+    # render_markdown() emits a few HTML entities of its own (&middot; as a separator,
+    # chiefly). Escaping turns those into visible &amp;middot; text, so they are put
+    # back afterwards — an allowlist, not a general unescape, because the point of
+    # escaping is that arbitrary & < > from the data must NOT become markup.
+    _ENTITIES = {"&amp;middot;": "\u00b7", "&amp;nbsp;": "\u00a0",
+                 "&amp;mdash;": "\u2014", "&amp;ndash;": "\u2013",
+                 "&amp;plusmn;": "\u00b1", "&amp;deg;": "\u00b0",
+                 "&amp;sigma;": "\u03c3", "&amp;times;": "\u00d7",
+                 "&amp;amp;": "&amp;"}
+
+    def inline(t: str) -> str:
+        t = _html.escape(t)
+        for k, v in _ENTITIES.items():
+            t = t.replace(k, v)
+        t = _re.sub(r"`([^`]+)`", r"<code>\1</code>", t)
+        t = _re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", t)
+        # Single asterisks LAST, and only after ** has been consumed, so bold is not
+        # shredded into two stray emphases.
+        t = _re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"<em>\1</em>", t)
+        return t
+
+    out: list[str] = []
+    rows: list[list[str]] = []
+    in_list = False
+
+    def flush_table():
+        nonlocal rows
+        if not rows:
+            return
+        head, body = rows[0], rows[1:]
+        # A separator row (---|---) is the header marker; drop it if present.
+        if body and all(set(c.strip()) <= set("-: ") for c in body[0]):
+            body = body[1:]
+        out.append("<table><thead><tr>"
+                   + "".join(f"<th>{inline(c.strip())}</th>" for c in head)
+                   + "</tr></thead><tbody>")
+        for r in body:
+            out.append("<tr>" + "".join(f"<td>{inline(c.strip())}</td>" for c in r) + "</tr>")
+        out.append("</tbody></table>")
+        rows = []
+
+    def flush_list():
+        nonlocal in_list
+        if in_list:
+            out.append("</ul>")
+            in_list = False
+
+    for raw in md.splitlines():
+        line = raw.rstrip()
+        if line.startswith("|") and line.endswith("|"):
+            flush_list()
+            rows.append(line.strip("|").split("|"))
+            continue
+        flush_table()
+        if not line.strip():
+            flush_list()
+            continue
+        if line.startswith("### "):
+            flush_list(); out.append(f"<h3>{inline(line[4:])}</h3>")
+        elif line.startswith("## "):
+            flush_list(); out.append(f"<h2>{inline(line[3:])}</h2>")
+        elif line.startswith("# "):
+            flush_list(); out.append(f"<h1>{inline(line[2:])}</h1>")
+        elif set(line.strip()) <= set("-") and len(line.strip()) >= 3:
+            flush_list(); out.append("<hr>")
+        elif line.lstrip().startswith("> "):
+            # Blockquote. render_markdown() uses it for the defer-to-human statement —
+            # the single most important sentence in the document — so it must not come
+            # out as a paragraph beginning with a stray angle bracket.
+            flush_list()
+            out.append(f"<blockquote>{inline(line.lstrip()[2:])}</blockquote>")
+        elif line.lstrip().startswith(("- ", "* ")):
+            if not in_list:
+                out.append("<ul>"); in_list = True
+            out.append(f"<li>{inline(line.lstrip()[2:])}</li>")
+        else:
+            flush_list(); out.append(f"<p>{inline(line)}</p>")
+    flush_table()
+    flush_list()
+    return "\n".join(out)
 
 
 def _mjpeg_part(payload: bytes) -> bytes:
@@ -1618,7 +1774,7 @@ def create_app(
 
     from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket
     from fastapi.responses import (
-        FileResponse, JSONResponse, PlainTextResponse, StreamingResponse)
+        FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse)
     from fastapi.staticfiles import StaticFiles
     from starlette.websockets import WebSocketDisconnect
 
@@ -2107,7 +2263,19 @@ def create_app(
 
     # ------------------------------------------------------ GET /evidence/{id}
     @app.get("/evidence/{record_id}")
-    async def get_evidence(record_id: str, allow_real: int = Query(0)):
+    async def get_evidence(record_id: str, allow_real: int = Query(0),
+                           format: str = Query("json"),
+                           download: int = Query(0)):
+        """
+        One case file, in the shape the caller needs.
+
+            ?format=html   rendered for reading and printing — what the console opens
+            ?format=md     the Markdown, as a download — the file you hand over
+            ?format=json   the machine-readable payload (default; unchanged)
+
+        THE DEFAULT STAYS json SO NOTHING THAT ALREADY CALLS THIS BREAKS. The console
+        asks for html explicitly.
+        """
         if allow_real and not allow_real_identities:
             # TWO independent gates, so no single mistake publishes a real vessel name
             # over HTTP. CLAUDE.md's rule against naming a real vessel is
@@ -2116,11 +2284,50 @@ def create_app(
                 403,
                 "allow_real=1 refused: this server was not started with "
                 "--allow-real-identities. Real identities over HTTP require both.")
+        fmt = (format or "json").lower()
+        if fmt not in ("json", "md", "markdown", "html"):
+            raise HTTPException(400, "format must be one of: json, md, html")
+
+        safe = "".join(c if (c.isalnum() or c in "-_.") else "_" for c in record_id)[:80]
+        no_store = {"Cache-Control": "no-store"}
+
         try:
-            payload = backend.evidence_payload(record_id, allow_real=bool(allow_real))
+            if fmt == "json":
+                payload = backend.evidence_payload(record_id, allow_real=bool(allow_real))
+                headers = dict(no_store)
+                if download:
+                    headers["Content-Disposition"] = \
+                        f'attachment; filename="evidence_{safe}.json"'
+                return JSONResponse(payload, headers=headers)
+
+            md = backend.evidence_markdown(record_id, allow_real=bool(allow_real))
         except KeyError:
             raise HTTPException(404, f"no evidence record {record_id!r}")
-        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+        if fmt in ("md", "markdown"):
+            # ALWAYS an attachment. A .md served inline renders as a wall of pipes and
+            # asterisks in a browser, which is exactly the "no proper output" this route
+            # was producing before. If you want to read it, ask for html.
+            return PlainTextResponse(
+                md, media_type="text/markdown; charset=utf-8",
+                headers={**no_store,
+                         "Content-Disposition": f'attachment; filename="evidence_{safe}.md"'})
+
+        q = f"?allow_real=1" if allow_real else ""
+        body = (
+            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+            f"<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+            f"<title>Case file {safe}</title><style>{_CASE_CSS}</style></head><body>"
+            "<div class=\"bar\">"
+            f"<a href=\"/evidence/{record_id}?format=md{'&allow_real=1' if allow_real else ''}\">"
+            "download .md</a>"
+            f"<a href=\"/evidence/{record_id}?format=json&download=1"
+            f"{'&allow_real=1' if allow_real else ''}\">download .json</a>"
+            "<a href=\"javascript:window.print()\">print / save as pdf</a>"
+            "</div>"
+            + _md_to_html(md)
+            + "</body></html>")
+        return HTMLResponse(body, headers=no_store)
 
     # ------------------------------------------------------------ GET /health
     @app.get("/health")

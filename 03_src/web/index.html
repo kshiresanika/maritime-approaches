@@ -94,13 +94,37 @@ body{
 .mono{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}
 
 /* ================= layout: header + 2x2 ================= */
-#app{display:grid;grid-template-rows:auto minmax(0,1fr);height:100vh}
+/* THE COLUMN IS minmax(0,1fr) AND NOT THE DEFAULT, AND THAT IS THE WHOLE BUG.
+   MEASURED DEFECT THIS FIXES: at a 1440 px viewport the page reported
+   scrollWidth 1938 against clientWidth 1440 — panes 2 and 4 (tactical picture and
+   evidence) ran 498 px off the right-hand edge and were CLIPPED, because body sets
+   overflow:hidden. Nothing scrolled and nothing errored; half the console was simply
+   not there, which reads as a broken tool rather than a layout that does not fit.
+   THE CAUSE: a grid column defaults to `auto`, which sizes to its widest child's
+   MAX-CONTENT. The header is a nowrap row of chips whose intrinsic width was 1938 px,
+   so it set the width of #app, and #grid's `1fr 1fr` then divided 1938 rather than the
+   viewport. minmax(0,1fr) lets the column be narrower than its content, which is what
+   forces the header to wrap instead of the panes to vanish. The header's own wrapping
+   rule below is the other half; either alone is not enough. */
+#app{display:grid;grid-template-rows:auto minmax(0,1fr);grid-template-columns:minmax(0,1fr);
+     height:100vh;max-width:100vw;overflow:hidden}
 
 header{
-  display:flex;align-items:center;gap:clamp(10px,1.2vw,24px);
+  /* WRAPS. The status chips are a variable-length row — one of them carries a whole
+     provenance sentence — so on any viewport narrower than the room's projector they
+     have to go to a second line. Wrapping costs ~28 px of height; not wrapping cost
+     the two right-hand panes entirely. `auto` on #app's first row means the grid below
+     simply takes what is left. */
+  display:flex;align-items:center;flex-wrap:wrap;
+  gap:6px clamp(10px,1.2vw,24px);
   padding:8px clamp(10px,1vw,18px);
   border-bottom:2px solid var(--rule);background:var(--panel);
+  min-width:0;
 }
+/* The spacer pushes the clock right when there IS room, and collapses when there is
+   not. Without the second rule it forces a line break of its own on a narrow screen. */
+header .spacer{flex:1 1 0;min-width:0}
+header .chip{max-width:100%}
 header h1{font-size:var(--f-lead);font-weight:800;letter-spacing:.055em;white-space:nowrap}
 header h1 .sub{color:var(--muted);font-weight:600;letter-spacing:.02em}
 .spacer{flex:1}
@@ -122,12 +146,35 @@ header h1 .sub{color:var(--muted);font-weight:600;letter-spacing:.02em}
 
 #grid{
   display:grid;gap:2px;background:var(--rule);
-  grid-template-columns:1fr 1fr;
-  /* `auto` first row so the disconnect banner takes only the height it needs and the
-     two pane rows keep their proportions. It collapses to zero when hidden. */
-  grid-template-rows:auto minmax(0,42fr) minmax(0,58fr);
+  /* minmax(0,1fr) rather than 1fr: a bare 1fr still has an automatic MINIMUM of
+     min-content, so a pane whose content refuses to shrink (a long unbroken chip, an
+     SVG with an intrinsic size) can push the other column off the screen. */
+  grid-template-columns:minmax(0,1fr) minmax(0,1fr);
+  min-width:0;
+  /* FOUR ROWS, AND EVERY CHILD IS PLACED EXPLICITLY.
+     MEASURED DEFECT THIS FIXES: with three rows and automatic placement, the two
+     banners (#linkBanner, #idAlarm) were expected to occupy the first `auto` row and
+     "collapse to zero when hidden". They do not. `display:none` removes an element
+     from the grid ENTIRELY rather than collapsing its row, so with both banners hidden
+     the four panes each moved up one row: panes 1-2 took the auto row, panes 3-4 took
+     the 42fr row, and the 58fr row — 188 px of it at 1440x900 — stayed empty at the
+     bottom of the screen. The priority queue, the pane that carries criterion 2, was
+     squeezed into 136 px and showed one contact out of eight.
+     WHY IT HID FOR SO LONG: it only appears when NO banner is showing. The WebSocket
+     was returning 404, so the "socket down" banner was always up, always filling row 1,
+     and the layout looked correct for the wrong reason. Fixing the socket exposed it.
+     Explicit grid-row on every child makes the placement independent of how many
+     banners happen to be visible. An `auto` row whose only child is display:none
+     contributes zero height, which is the behaviour that was wanted all along. */
+  grid-template-rows:auto auto minmax(0,42fr) minmax(0,58fr);
   min-height:0;
 }
+#grid > #linkBanner{grid-row:1;grid-column:1/-1}
+#grid > #idAlarm{grid-row:2;grid-column:1/-1}
+#grid > .pane:nth-of-type(1){grid-row:3;grid-column:1}
+#grid > .pane:nth-of-type(2){grid-row:3;grid-column:2}
+#grid > .pane:nth-of-type(3){grid-row:4;grid-column:1}
+#grid > .pane:nth-of-type(4){grid-row:4;grid-column:2}
 .pane{background:var(--panel);display:grid;grid-template-rows:auto minmax(0,1fr);min-height:0;min-width:0}
 .pane>h2{
   display:flex;align-items:center;gap:10px;
@@ -140,8 +187,29 @@ header h1 .sub{color:var(--muted);font-weight:600;letter-spacing:.02em}
 .body::-webkit-scrollbar-thumb{background:var(--rule);border-radius:6px}
 
 /* ================= 1. live sensor ================= */
-#sensorWrap{position:relative;height:100%;display:grid;place-items:center;background:#05070a;overflow:hidden}
-#feed{max-width:100%;max-height:100%;display:block}
+/* NOT a centring grid any more. `place-items:center` sized the row from the image,
+   which made the image's own height:100% circular — so it was ignored and the image
+   rendered at its full aspect height (404 px in a 286 px pane) while the SVG overlay
+   fitted correctly. Both layers are now ABSOLUTELY POSITIONED over this box, which is
+   definite, so `contain` means the same rectangle to both of them. */
+#sensorWrap{position:relative;height:100%;background:#05070a;overflow:hidden}
+/* THE OVERLAY AND THE IMAGE MUST RESOLVE TO THE SAME BOX, AND max-height DID NOT.
+   MEASURED DEFECT THIS FIXES (1440x900): #sensorWrap was 719x286, #boxes was 719x286
+   — but #feed rendered 719x404. A percentage max-height resolves against the grid
+   AREA, and #sensorWrap's row is sized by its own item, so the constraint is circular
+   and the browser drops it: the image took its full aspect height, overflowed the pane
+   and was clipped, while the SVG fitted 1920x1080 into 719x286 and centred it at
+   x=105, w=508. Two different scales (0.374 vs 0.265) and two different origins.
+   EVERY DETECTION BOX WAS THEREFORE DRAWN IN THE WRONG PLACE, on every run since the
+   pane existed, and the offset grows with the pane's aspect ratio.
+   WHY IT MATTERS — a box that does not sit on its hull is a watch screen asserting a
+   vessel is somewhere it is not. It also looks exactly like a tracking failure, which
+   is how it was reported, and would have sent us hunting in the detector.
+   THE FIX — width/height 100% plus object-fit:contain gives the image the SAME box as
+   the SVG and the SAME letterboxing rule as preserveAspectRatio="xMidYMid meet". The
+   two cannot now disagree, at any pane size, because they are both `contain` over one
+   rectangle. */
+#feed{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;object-position:center;display:block}
 #feed.hidden{display:none}
 #boxes{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
 /* When there is no imagery the detection boxes still draw — they ARE the sensor's
@@ -1226,18 +1294,176 @@ async function initVideo() {
 <script>
 "use strict";
 /* ===========================================================================
+   5b. OFFLINE MAP BACKEND — a Leaflet-shaped shim over plain SVG.
+   Installed as window.L ONLY when the real Leaflet is absent. See patch_map.py
+   for the argument; the short version is that the map draws pure geometry
+   already, so the only thing the CDN was still buying us was the drawing code.
+   Fixed north-up plan view: no tiles, no pan, no zoom, no network, no basemap.
+   =========================================================================== */
+function installOfflineMap() {
+  const NS = "http://www.w3.org/2000/svg";
+  const el = (n, a = {}) => { const e = document.createElementNS(NS, n);
+    for (const k in a) if (a[k] != null) e.setAttribute(k, a[k]); return e; };
+
+  /* Equirectangular, with the longitude axis compressed by cos(lat). Over a few tens
+     of kilometres that is accurate to well under a pixel, and it keeps bearings
+     visually true — which matters here, because a bearing line that does not point
+     where the number says would undermine the one pane that has to be trusted. */
+  class Proj {
+    constructor(w, h) { this.w = w; this.h = h; this.set([[54.3, 10.8], [55.0, 11.9]]); }
+    set(bounds) {
+      let [[s, wl], [n, e]] = bounds;
+      const latC = (s + n) / 2, k = Math.max(0.2, Math.cos(latC * Math.PI / 180));
+      let dLat = Math.max(1e-4, n - s), dLon = Math.max(1e-4, e - wl) * k;
+      /* Preserve aspect: expand the short axis rather than stretching the picture.
+         A stretched plan view puts a 90-degree bearing somewhere other than due east. */
+      const boxAR = this.w / Math.max(1, this.h), dataAR = dLon / dLat;
+      if (dataAR < boxAR) { const want = dLat * boxAR; const grow = (want - dLon) / k / 2;
+                            wl -= grow; e += grow; dLon = want; }
+      else { const want = dLon / boxAR; const grow = (want - dLat) / 2; s -= grow; n += grow; dLat = want; }
+      this.s = s; this.n = n; this.wl = wl; this.e = e; this.k = k;
+    }
+    xy(lat, lon) {
+      return [((lon - this.wl) * this.k) / ((this.e - this.wl) * this.k) * this.w,
+              (this.n - lat) / (this.n - this.s) * this.h];
+    }
+  }
+
+  class Layer {
+    constructor(kind, latlngs, opts) { this.kind = kind; this.latlngs = latlngs;
+      this.opts = opts || {}; this._tip = null; this._click = null; }
+    addTo(t) { t._add(this); return this; }
+    bindTooltip(t) { this._tip = t; if (this._node) this._retip(); return this; }
+    on(ev, fn) { if (ev === "click") this._click = fn; return this; }
+    _retip() { let ti = this._node.querySelector("title");
+      if (!ti) { ti = el("title"); this._node.appendChild(ti); }
+      ti.textContent = this._tip; }
+    draw(proj, g) {
+      const o = this.opts, stroke = o.color || "#8aa", w = o.weight ?? 2;
+      let node;
+      if (this.kind === "circleMarker") {
+        const [x, y] = proj.xy(this.latlngs[0], this.latlngs[1]);
+        node = el("circle", { cx: x, cy: y, r: o.radius ?? 6, stroke, "stroke-width": w,
+          fill: o.fillColor || "none", "fill-opacity": o.fillOpacity ?? 1 });
+      } else {
+        const pts = this.latlngs.map(p => proj.xy(p[0], p[1]).map(v => v.toFixed(1)).join(",")).join(" ");
+        node = el(this.kind === "polygon" ? "polygon" : "polyline",
+          { points: pts, stroke, "stroke-width": w, fill: this.kind === "polygon" ? (o.fillColor || "none") : "none",
+            "fill-opacity": this.kind === "polygon" ? (o.fillOpacity ?? .4) : 0,
+            "stroke-dasharray": o.dashArray || null, "stroke-opacity": o.opacity ?? 1,
+            "stroke-linejoin": "round", "stroke-linecap": "round" });
+      }
+      if (o.interactive === false) node.setAttribute("pointer-events", "none");
+      else if (this._click) { node.style.cursor = "pointer"; node.addEventListener("click", this._click); }
+      this._node = node;
+      if (this._tip) this._retip();
+      g.appendChild(node);
+    }
+  }
+
+  class Group {
+    constructor() { this.children = []; }
+    _add(l) { this.children.push(l); if (this._map) this._map._redraw(); }
+    addTo(m) { this._map = m; m._groups.push(this); return this; }
+    clearLayers() { this.children.length = 0; if (this._map) this._map._redraw(); return this; }
+  }
+
+  class Map {
+    constructor(id) {
+      this.host = document.getElementById(id);
+      this.host.innerHTML = "";
+      this.svg = el("svg", { width: "100%", height: "100%" });
+      this.svg.style.display = "block";
+      this.host.appendChild(this.svg);
+      this._own = []; this._groups = []; this._bounds = null;
+      /* The pane is a grid cell that resizes with the window; without this the plan
+         view keeps whatever size it had when it was first drawn, and every bearing on
+         it is then drawn against the wrong aspect ratio. */
+      new ResizeObserver(() => this._redraw()).observe(this.host);
+    }
+    _add(l) { this._own.push(l); this._redraw(); }
+    setView(c, z) { const d = 0.36 / Math.pow(1.6, (z || 11) - 11);
+      if (!this._bounds) this._bounds = [[c[0] - d, c[1] - d * 1.7], [c[0] + d, c[1] + d * 1.7]];
+      this._redraw(); return this; }
+    fitBounds(b) { this._bounds = b.toArray ? b.toArray() : b; this._redraw(); return this; }
+    _redraw() {
+      const w = this.host.clientWidth || 600, h = this.host.clientHeight || 400;
+      if (!this._proj || this._proj.w !== w || this._proj.h !== h) this._proj = new Proj(w, h);
+      if (this._bounds) this._proj.set(this._bounds);
+      this.svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+      this.svg.replaceChildren();
+      const g = el("g");
+      this.svg.appendChild(g);
+      for (const l of this._own) l.draw(this._proj, g);
+      for (const grp of this._groups) for (const l of grp.children) l.draw(this._proj, g);
+      this._scaleBar(g, w, h);
+    }
+    /* A plan view with no basemap needs a scale and a north mark, or every distance on
+       it is unreadable and the pane asserts geometry it does not explain. */
+    _scaleBar(g, w, h) {
+      const p = this._proj, latC = (p.s + p.n) / 2;
+      const mPerPx = (p.e - p.wl) * p.k * 111320 / Math.max(1, w);
+      const targets = [500, 1000, 2000, 5000, 10000, 20000, 50000];
+      const want = mPerPx * w * 0.22;
+      const m = targets.reduce((a, b) => Math.abs(b - want) < Math.abs(a - want) ? b : a);
+      const px = m / mPerPx, x0 = 14, y0 = h - 20;
+      g.appendChild(el("line", { x1: x0, y1: y0, x2: x0 + px, y2: y0, stroke: "#7f93a6", "stroke-width": 3 }));
+      for (const x of [x0, x0 + px])
+        g.appendChild(el("line", { x1: x, y1: y0 - 5, x2: x, y2: y0 + 5, stroke: "#7f93a6", "stroke-width": 3 }));
+      const t = el("text", { x: x0, y: y0 - 10, fill: "#b9c8d6", "font-size": 12,
+        "font-family": "ui-monospace,Menlo,monospace", "font-weight": 700 });
+      t.textContent = m >= 1000 ? `${m / 1000} km` : `${m} m`;
+      g.appendChild(t);
+      const nx = w - 26, ny = 30;
+      g.appendChild(el("line", { x1: nx, y1: ny + 20, x2: nx, y2: ny - 6, stroke: "#7f93a6", "stroke-width": 3 }));
+      g.appendChild(el("polygon", { points: `${nx},${ny - 12} ${nx - 5},${ny - 2} ${nx + 5},${ny - 2}`, fill: "#7f93a6" }));
+      const nt = el("text", { x: nx - 5, y: ny + 34, fill: "#b9c8d6", "font-size": 12,
+        "font-family": "ui-monospace,Menlo,monospace", "font-weight": 700 });
+      nt.textContent = "N";
+      g.appendChild(nt);
+    }
+  }
+
+  const Bounds = pts => ({
+    _p: pts,
+    pad(f) { const la = pts.map(p => p[0]), lo = pts.map(p => p[1]);
+      const s = Math.min(...la), n = Math.max(...la), w = Math.min(...lo), e = Math.max(...lo);
+      const dy = (n - s) * f || 0.01, dx = (e - w) * f || 0.01;
+      return { toArray: () => [[s - dy, w - dx], [n + dy, e + dx]] }; },
+    toArray() { const la = pts.map(p => p[0]), lo = pts.map(p => p[1]);
+      return [[Math.min(...la), Math.min(...lo)], [Math.max(...la), Math.max(...lo)]]; },
+  });
+
+  window.L = {
+    OFFLINE_SHIM: true,
+    map: id => new Map(id),
+    layerGroup: () => new Group(),
+    polyline: (ll, o) => new Layer("polyline", ll, o),
+    polygon: (ll, o) => new Layer("polygon", ll, o),
+    circleMarker: (ll, o) => new Layer("circleMarker", ll, o),
+    latLngBounds: Bounds,
+    /* Tiles are a network basemap. There is deliberately no offline equivalent: a
+       half-drawn substitute would be a picture of a coastline nobody surveyed. */
+    tileLayer: () => ({ addTo: () => {} }),
+  };
+}
+
+/* ===========================================================================
    6. PANE 2 — MAP
    =========================================================================== */
 let MAP = null, LAYER = null, fitted = false;
 
 async function initMap() {
+  let offline = false;
   try { await loadLeaflet(); }
   catch {
-    $("map").innerHTML = "<div style='padding:22px;color:var(--dark);font-size:var(--f-body);"
-      + "line-height:1.5'><b>MAP LIBRARY UNAVAILABLE.</b><br>Leaflet is not present at "
-      + "/assets/leaflet.js and the CDN could not be reached. The other three panes are "
-      + "unaffected — nothing on this screen except the map depends on it.</div>";
-    return;
+    /* NO LEAFLET, NO PROBLEM — AND THIS IS THE DEFAULT AT A VENUE, NOT AN EDGE CASE.
+       The pane used to print MAP LIBRARY UNAVAILABLE and stop, which knocked out the
+       one pane carrying criterion 2 whenever the wifi did not cooperate. The shim
+       draws the same geometry through the same calls; renderMap() below is unchanged
+       and does not know which backend it has. */
+    installOfflineMap();
+    offline = true;
   }
   MAP = L.map("map", { zoomControl: true, attributionControl: true })
         .setView([54.60, 11.30], 11);
@@ -1252,6 +1478,12 @@ async function initMap() {
     $("cBasemap").textContent = "OSM basemap · needs network";
   } else {
     drawGraticule();
+  }
+  if (offline) {
+    /* Said on the screen, not just in a console log. An operator is entitled to know
+       the pane is a plan view with no basemap under it — the geometry is real, the
+       coastline is simply not drawn, and those are different absences. */
+    $("cBasemap").textContent = "offline plan view · no basemap · geometry is real";
   }
   LAYER = L.layerGroup().addTo(MAP);
   renderMap();
@@ -1769,7 +2001,23 @@ async function postAction(action, rec) {
   }
   /* EXPORT is the one action with an artefact. The evidence route is pseudonymised by
      default and refuses real identities unless the server was started for it. */
-  if (action === "EXPORT") window.open("/evidence/" + encodeURIComponent(rec.record_id), "_blank");
+  /* format=html, not raw JSON. The route renders evidence.py's case file — verdict,
+     observation, claim, the mismatch table, the pairing, the priority, the rationale
+     and the limitations, in that order — with .md / .json / print links on it. Opening
+     the JSON was the whole of "export evidence produced no proper output". */
+  if (action === "EXPORT") {
+    const w = window.open("/evidence/" + encodeURIComponent(rec.record_id) + "?format=html",
+                          "_blank", "noopener");
+    /* Popup blockers exist and a silently blocked export looks like a dead button.
+       Say so, and leave the operator a link they can click themselves. */
+    if (!w) {
+      const u = "/evidence/" + encodeURIComponent(rec.record_id) + "?format=html";
+      $("ack").innerHTML = "Export blocked by the browser's popup blocker — "
+        + "<a href='" + u + "' target='_blank' rel='noopener' "
+        + "style='color:var(--accent)'>open the case file</a>";
+      return;
+    }
+  }
 }
 
 /* ===========================================================================

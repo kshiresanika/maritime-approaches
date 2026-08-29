@@ -136,6 +136,37 @@ def preflight(args) -> Preflight:
                       f"# only needed for --camera", False),
     })
 
+    # ---- the WebSocket transport, which uvicorn does NOT bring with it ----------
+    #
+    # MEASURED DEFECT THIS CATCHES (2026-08-29): the console reported "WEBSOCKET DOWN —
+    # the socket is down; the REST fallback IS answering" and fell back to 2 s polling.
+    # /ws returned 404. The route was registered and correct; uvicorn simply had no
+    # WebSocket implementation installed, and in that state it does not warn — it
+    # answers 404 to the upgrade, which is indistinguishable from a missing route.
+    #
+    # `pip install uvicorn` alone does NOT pull one in; `uvicorn[standard]` does. So the
+    # single most visible feature of the console — a live push picture instead of a
+    # 2-second-stale polled one — silently depends on an extra that is easy to miss and
+    # impossible to diagnose from the symptom.
+    #
+    # NOT FATAL: the console degrades honestly to polling and says so on screen, which
+    # is a design decision worth keeping. It is a loud warning, not a stop.
+    try:
+        import websockets                                   # noqa: F401
+        _ws = "websockets"
+    except ImportError:
+        try:
+            import wsproto                                  # noqa: F401
+            _ws = "wsproto"
+        except ImportError:
+            _ws = None
+    pf.check("uvicorn websocket transport", _ws is not None,
+             f"{_ws} present" if _ws else
+             "NEITHER websockets NOR wsproto is installed",
+             f"{exe} -m pip install websockets   "
+             f"# without it uvicorn answers 404 to /ws and the console polls every 2 s",
+             fatal=False)
+
     # ---- the seam that was broken on 2026-08-29 ---------------------------------
     # verdict.py imported two names consistency.py did not define, which made
     # run_pipeline, server AND app unimportable -- all three entry points, including
@@ -536,7 +567,8 @@ examples
     p.add_argument("--node-id", default="sensor-01",
                    help="provenance. Appears on every contact and in the case file.")
     p.add_argument("--live", action="store_true",
-                   help="PROMOTE THE LIVE SENSOR at startup instead of the recorded "
+                   help="RUN THE SENSOR NODE on --video/--camera and promote it at "
+                        "startup instead of the recorded "
                         "scene. Off by default: the recorded scene carries the full "
                         "ranked picture with its injected faults, and a blob detector "
                         "on a short clip does not. The console can switch either way "
@@ -665,8 +697,15 @@ examples
         ais_coverage_confidence=args.ais_coverage_confidence,
     )
 
+    # THE NODE STARTS ONLY ON --live, and this is a correction of the same mistake as
+    # the initial_source default above. `--video` means "put this imagery on the
+    # console"; it does not mean "detect on it". Starting a node anyway meant the T1
+    # demo — recorded picture, scene rendering in the pane, no sensor involved — always
+    # launched a detector that then refused over an unfilled pose file and printed an
+    # alarming error about hfov_deg into a demo that was working perfectly.
     node_proc = (start_local_node(args, args.port)
-                 if (args.camera is not None or args.video is not None) else None)
+                 if (args.live and (args.camera is not None or args.video is not None))
+                 else None)
     if node_proc is not None:
         pump(node_proc, "node")
 
