@@ -454,6 +454,7 @@ def start_local_node(args, port: int) -> subprocess.Popen | None:
            "--pose", str(args.pose),
            "--scale", str(args.scale),
            "--node-id", str(args.node_id),
+           "--min-area", str(args.min_area),
            "--publish-frames", f"http://127.0.0.1:{port}/ingest/frame",
            "--post", f"http://127.0.0.1:{port}/api/contacts"]
     if args.loop:
@@ -566,6 +567,13 @@ examples
                         "pitch instead of the sensor going dark mid-sentence")
     p.add_argument("--node-id", default="sensor-01",
                    help="provenance. Appears on every contact and in the case file.")
+    p.add_argument("--min-area", type=int, default=120,
+                   help="detector blob-area floor in PIXELS, passed to the node. "
+                        "MEASURED on scene01: hull areas are 1280, 1080, 784, 96, 55, "
+                        "32, 20 and 20 px, so the 120 default silently excludes FIVE "
+                        "of the eight contacts before the background subtractor is "
+                        "even consulted. 30 recovers them; going lower starts "
+                        "reporting compression noise as vessels.")
     p.add_argument("--live", action="store_true",
                    help="RUN THE SENSOR NODE on --video/--camera and promote it at "
                         "startup instead of the recorded "

@@ -366,8 +366,7 @@ def render(manifest: dict, contacts: list[dict], out: Path, *,
         print(f"\nshow it (T1 — the recorded scene IS the picture; no sensor node):\n"
               f"  python3 03_src/main.py --video {out} --loop")
         print(f"\nfor the live-sensor path instead, build the other cut:\n"
-              f"  python3 04_demo/make_scene_video.py --for detector "
-              f"--out {out.parent / 'scene_detector.mp4'}")
+              f"  python3 04_demo/make_scene_video.py --for detector")
     else:
         print(f"\nshow it (live sensor node on the clip):\n"
               f"  python3 03_src/main.py --video {out} --loop --live \\\n"
@@ -404,7 +403,24 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     manifest, contacts = load_scene(args.scene)
-    out = args.out or (args.scene / "scene.mp4")
+    # THE DEFAULT FILENAME FOLLOWS THE MODE, AND IT DID NOT BEFORE.
+    #
+    # MEASURED DEFECT THIS FIXES (2026-08-29 18:56): `--for detector` with no --out
+    # wrote to scene.mp4 and DESTROYED the recorded cut. The two cuts are not
+    # interchangeable — the recorded cut places every hull at its contact's own
+    # bbox_px so the console's boxes land on it, while the detector cut places hulls
+    # by h/tan(depression) and drifts them. Put the detector cut in scene.mp4 and the
+    # T1 console draws recorded boxes over drifting hulls: every box off its hull.
+    #
+    # WHY NOTHING WARNED — and this is the part that matters. server.py's _video_sync()
+    # decides "is this imagery the scene's own rendering?" BY PATH: it checks whether
+    # the video's parent directory is the scene directory. scene.mp4 passes that test
+    # whatever is inside it, so the console would have reported the reassuring
+    # "scene rendering: this imagery was rendered from the very contacts drawn over it"
+    # over imagery that was nothing of the kind. The quiet lie the mode split existed
+    # to prevent, arriving through the filename instead.
+    out = args.out or (args.scene / ("scene_detector.mp4" if args.mode == "detector"
+                                     else "scene.mp4"))
     render(manifest, contacts, out, seconds=args.seconds, fps=args.fps,
            time_lapse=args.time_lapse, mode=args.mode)
     return 0

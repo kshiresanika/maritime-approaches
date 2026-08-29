@@ -170,7 +170,14 @@ header h1 .sub{color:var(--muted);font-weight:600;letter-spacing:.02em}
   min-height:0;
 }
 #grid > #linkBanner{grid-row:1;grid-column:1/-1}
-#grid > #idAlarm{grid-row:2;grid-column:1/-1}
+/* Row 2 was reserved for #idAlarm, which actually lives inside pane 4 and is not a
+   grid child at all, so the row sat empty. The demoted-node banner uses it. */
+#grid > #demoteBanner{grid-row:2;grid-column:1/-1}
+#demoteBanner{
+  background:#3a2a08;color:#ffd166;border-bottom:2px solid #ffb64d;
+  padding:9px clamp(10px,1vw,18px);font:700 var(--f-body)/1.4 inherit;
+}
+#demoteBanner b{color:#fff}
 #grid > .pane:nth-of-type(1){grid-row:3;grid-column:1}
 #grid > .pane:nth-of-type(2){grid-row:3;grid-column:2}
 #grid > .pane:nth-of-type(3){grid-row:4;grid-column:1}
@@ -256,13 +263,55 @@ header h1 .sub{color:var(--muted);font-weight:600;letter-spacing:.02em}
 .leaflet-control-attribution a{color:var(--accent)!important}
 #mapBadges{position:absolute;right:8px;top:8px;z-index:600;display:flex;flex-direction:column;gap:6px;align-items:flex-end}
 #mapBadges .chip{background:rgba(8,11,16,.9)}
+/* THE LEGEND IS PART OF THE EVIDENCE, NOT DECORATION.
+   Criterion 4 asks for output an operator can act on and a judge can read. A plan view
+   with no basemap, drawing four different geometric objects in five verdict colours,
+   is unreadable without a key — and the uncertainty QUAD in particular is routinely
+   read as "a box around the ship" when it is the opposite: the region the ship could
+   be in. Each glyph below is drawn with the same CSS the map uses, so the key cannot
+   drift from the picture the way a bitmap legend would. */
 #legend{
-  position:absolute;left:8px;bottom:8px;z-index:600;background:rgba(8,11,16,.92);
-  border:1px solid var(--rule);border-radius:6px;padding:7px 10px;font-size:var(--f-micro);
-  display:grid;gap:4px;
+  position:absolute;left:8px;bottom:8px;z-index:600;background:rgba(8,11,16,.94);
+  border:1px solid var(--rule);border-radius:6px;font-size:var(--f-micro);
+  /* CAPPED, AND THAT CAP IS A BUG FIX. The previous revision had no max-height and a
+     long explanatory paragraph inside it. Anchored at bottom:8px it grew UPWARDS past
+     the top of the pane and covered the tactical picture it was supposed to explain —
+     a legend that hides the map is worse than no legend. Height is now bounded to
+     less than half the pane and the list scrolls inside itself. */
+  max-width:min(34ch,calc(100% - 16px));max-height:min(46%,320px);
+  overflow:auto;padding:7px 9px;
 }
-#legend i{width:16px;height:0;border-top:4px solid;display:inline-block;vertical-align:middle;margin-right:7px}
-#legend span{color:var(--fg2);white-space:nowrap}
+#legend::-webkit-scrollbar{width:8px}
+#legend::-webkit-scrollbar-thumb{background:var(--rule);border-radius:6px}
+#legend .lg-h{
+  color:var(--muted);font:800 .9em/1 ui-monospace,Menlo,monospace;
+  letter-spacing:.08em;text-transform:uppercase;margin:6px 0 3px;
+}
+#legend .lg-h:first-child{margin-top:0}
+#legend span{color:var(--fg2);display:flex;align-items:center;gap:7px;
+  white-space:nowrap;line-height:1.5}
+#legend i{width:18px;height:12px;flex:0 0 18px;display:inline-block;position:relative}
+#legend i.g-line{border-top:4px solid;height:0;align-self:center}
+#legend i.g-dash{border-top:4px dashed;height:0;align-self:center}
+#legend i.g-dot::before{content:"";position:absolute;left:3px;top:1px;width:10px;height:10px;
+  border-radius:50%;border:2.5px solid var(--claimed);background:var(--muted)}
+#legend i.g-quad::before{content:"";position:absolute;left:0;top:1px;width:17px;height:9px;
+  border:2px solid var(--observed);background:rgba(255,208,138,.18);transform:skewX(-20deg)}
+#legend i.g-wedge::before{content:"";position:absolute;left:1px;top:0;width:0;height:0;
+  border-left:8px solid transparent;border-right:8px solid transparent;
+  border-bottom:12px solid rgba(61,84,104,.85)}
+#legend i.g-cam::before{content:"";position:absolute;left:4px;top:2px;width:8px;height:8px;
+  border-radius:50%;border:2.5px solid var(--accent);background:var(--accent)}
+#legend i.g-asset::before{content:"";position:absolute;left:4px;top:2px;width:8px;height:8px;
+  border-radius:50%;border:2.5px solid #f4f8fc;background:#18202a}
+/* The long "what the quad means" explanation now lives in the pane FOOTER, one line,
+   where it cannot occlude the geometry. */
+#mapFoot{
+  position:absolute;left:8px;right:8px;bottom:0;z-index:590;pointer-events:none;
+  color:var(--muted);font-size:var(--f-micro);line-height:1.35;
+  background:linear-gradient(to top,rgba(8,11,16,.95),rgba(8,11,16,0));
+  padding:14px 2px 4px;
+}
 
 /* ================= 3. priority queue ================= */
 #queue{list-style:none;padding:4px}
@@ -459,6 +508,7 @@ body.degraded .pane>h2::after{content:" · STALE";color:var(--dark);font-weight:
 
 <div id="grid">
   <div id="linkBanner" role="status" aria-live="polite"></div>
+  <div id="demoteBanner" role="status" aria-live="polite" hidden></div>
 
   <!-- 1 ------------------------------------------------------------------ -->
   <section class="pane" aria-label="Live sensor">
@@ -489,11 +539,27 @@ body.degraded .pane>h2::after{content:" · STALE";color:var(--dark);font-weight:
         <span class="chip" id="cBasemap">no basemap · offline-safe</span>
       </div>
       <div id="legend">
-        <span><i style="border-color:var(--claimed)"></i>AIS claim (position broadcast)</span>
-        <span><i style="border-color:var(--observed)"></i>camera observation + uncertainty</span>
-        <span><i style="border-color:var(--spoof)"></i>SPOOF &nbsp;<i style="border-color:var(--dark)"></i>DARK &nbsp;<i style="border-color:var(--match)"></i>MATCH</span>
-        <span><i style="border-color:var(--ok);border-top-style:dashed"></i>protected infrastructure</span>
+        <div class="lg-h">the wall</div>
+        <span><i class="g-dot"></i>AIS claim</span>
+        <span><i class="g-quad"></i>observation &mdash; uncertainty quad</span>
+        <span><i class="g-line" style="border-color:var(--spoof)"></i>solid tie = SPOOF</span>
+        <span><i class="g-dash" style="border-color:var(--match)"></i>dashed tie = paired</span>
+        <div class="lg-h">verdict</div>
+        <span><i class="g-line" style="border-color:var(--spoof)"></i>SPOOF &mdash; identity contradicted</span>
+        <span><i class="g-line" style="border-color:var(--dark)"></i>DARK &mdash; seen, no transponder</span>
+        <span><i class="g-line" style="border-color:var(--match)"></i>MATCH &mdash; claim agrees</span>
+        <span><i class="g-line" style="border-color:#c9a6ff"></i>UNKNOWN &mdash; deferred</span>
+        <div class="lg-h">the stage</div>
+        <span><i class="g-cam"></i>camera position</span>
+        <span><i class="g-wedge"></i>field of view</span>
+        <span><i class="g-dash" style="border-color:var(--ok)"></i>protected infrastructure</span>
+        <span><i class="g-asset"></i>patrol asset</span>
+        <span><i class="g-line" style="border-color:#1d2733"></i>graticule 0.1&deg; &middot; north-up</span>
       </div>
+      <div id="mapFoot">The <b>quad</b> is not a box round a hull &mdash; it is where the
+        vessel could be: bearing &plusmn;&sigma; by range &plusmn;&sigma;. One camera measures angle
+        well and range badly, so it is long along the line of sight, which is exactly
+        where an along-sight position spoof hides.</div>
     </div>
   </section>
 
@@ -1128,6 +1194,29 @@ function renderSensor() {
       + (age === null ? " · never heard from" : " · seen " + age + " s ago")
       + (stale ? " · BELIEF IS STALE" : "");
     tn.style.color = !live.online ? "var(--off)" : stale ? "var(--dark)" : "";
+  }
+
+  /* A NODE THAT IS POSTING BUT NOT PROMOTED IS THE QUIETEST FAILURE ON THIS SCREEN,
+     and until now the console said NOTHING about it.
+     MEASURED (probe against ConsoleBackend, 2026-08-29): with the authority on
+     RECORDED, a node posting perfectly good contacts is answered with
+     source.note_demoted() and its observations never reach a record. The server has
+     published `demoted_nodes` in source_switch status the whole time; nothing read it.
+     The operator saw eight boxes that never moved and had no way to learn that the
+     live sensor was being ignored by design. */
+  const dem = S.stage?.source?.demoted_nodes || {};
+  const demIds = Object.keys(dem);
+  const db = $("demoteBanner");
+  if (db) {
+    if (demIds.length) {
+      db.hidden = false;
+      db.innerHTML = "<b>LIVE SENSOR IGNORED —</b> "
+        + demIds.map(k => `<b>${k}</b>: ${dem[k]}`).join(" &middot; ")
+        + ". The boxes on screen are the <b>recorded scene's</b>, not this sensor's. "
+        + "Switch the source to VIDEO_STREAM to put the live sensor in the picture.";
+    } else {
+      db.hidden = true;
+    }
   }
 
   /* Detection boxes. Drawn whether or not imagery is available: the boxes ARE the
@@ -2006,8 +2095,18 @@ async function postAction(action, rec) {
      and the limitations, in that order — with .md / .json / print links on it. Opening
      the JSON was the whole of "export evidence produced no proper output". */
   if (action === "EXPORT") {
+    /* NO "noopener" IN THE FEATURES STRING, AND THAT IS THE WHOLE BUG.
+       MEASURED DEFECT THIS FIXES: every successful export ALSO showed "Export blocked
+       by the browser's popup blocker", because window.open() with noopener in the
+       third argument returns NULL ON SUCCESS -- with no opener relationship there is
+       no window object to hand back. That is specified behaviour, not a quirk. So the
+       `if (!w)` popup-blocker branch fired every single time, and criterion 4's one
+       artefact looked broken while working perfectly.
+       The isolation is kept by NULLING w.opener on the returned window instead, which
+       gives the same protection and still lets us detect a real block. */
     const w = window.open("/evidence/" + encodeURIComponent(rec.record_id) + "?format=html",
-                          "_blank", "noopener");
+                          "_blank");
+    if (w) { try { w.opener = null; } catch (_) {} }
     /* Popup blockers exist and a silently blocked export looks like a dead button.
        Say so, and leave the operator a link they can click themselves. */
     if (!w) {

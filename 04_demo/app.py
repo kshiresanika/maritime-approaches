@@ -80,8 +80,24 @@ class State:
     def recompute(self) -> None:
         assert self.scene is not None
         contacts = self.live_contacts if self.mode == "live" else self.scene["contacts"]
+        # AN EMPTY CONTACT LIST IS A NORMAL STATE, NOT AN ERROR STATE.
+        # A live sensor watching empty water, or one that has not posted its first
+        # batch yet, legitimately yields zero contacts. associate() then needs an
+        # explicit instant to propagate the AIS claims to. The scene's own recorded
+        # time is the right instant -- the claims ARE that scene's -- and it keeps a
+        # zero-contact recompute deterministic instead of wall-clock dependent.
+        now = None
+        if not contacts:
+            stamp = (self.scene["manifest"].get("ais") or {}).get("scene_time_utc")
+            if stamp:
+                from datetime import datetime as _dt
+                try:
+                    now = _dt.fromisoformat(str(stamp).replace("Z", "+00:00"))
+                except ValueError:
+                    now = None
         result = run_pipeline.run_scene(
             self.scene["tracks"], contacts, self.scene["manifest"]["pose"],
+            now=now,
             ais_coverage_confidence=self.ais_coverage_confidence)
         if self.scene["ground_truth"] and self.mode == "replay":
             result["scoring"] = run_pipeline.score_scene(

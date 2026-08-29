@@ -313,7 +313,8 @@ def _classical_detection_confidence(area_px: float, frames: int,
     return round(0.30 + 0.60 * (0.5 * a + 0.5 * f), 4)
 
 
-def to_contact(det: dict, *, horizon_y: float, pose: dict, frame_w: int, frame_h: int,
+def to_contact(det: dict, *, node_id: str = "sensor-01",
+               horizon_y: float, pose: dict, frame_w: int, frame_h: int,
                scale: float, frame_time: datetime, frame_ref: str,
                min_area_px: int = 120) -> dict:
     """
@@ -365,7 +366,12 @@ def to_contact(det: dict, *, horizon_y: float, pose: dict, frame_w: int, frame_h
             length_sigma *= scale
 
     return {
-        "contact_id": f"pi-{det['track_id']}",
+        # NAMESPACED BY NODE, AND WITH TWO CAMERAS THIS IS NOT COSMETIC.
+        # The track id is this detector's own counter, so every node's first track is
+        # 1. Two cameras posting "pi-1" collide in the shore station's per-node fuse
+        # and one hull disappears from the picture with nothing raised anywhere.
+        # The node id is the only thing guaranteed distinct between them.
+        "contact_id": f"{node_id}-{det['track_id']}",
         "frame_time_utc": frame_time.isoformat(),
         "frame_ref": frame_ref,
         "bbox_px": [det["x"], det["y"], det["x"] + det["w"], det["y"] + det["h"]],
@@ -650,7 +656,8 @@ def main(argv: list[str] | None = None) -> int:
             if now - last_post >= args.interval:
                 ts = datetime.now(timezone.utc)
                 contacts = [
-                    to_contact(d, horizon_y=horizon, pose=pose, frame_w=w, frame_h=h,
+                    to_contact(d, node_id=args.node_id,
+                               horizon_y=horizon, pose=pose, frame_w=w, frame_h=h,
                                scale=args.scale, frame_time=ts,
                                frame_ref=f"{scheme}://{pose.get('pose_ref')}/"
                                          f"{ts.isoformat()}")

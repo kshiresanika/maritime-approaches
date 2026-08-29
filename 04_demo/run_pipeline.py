@@ -89,6 +89,21 @@ def run_scene(
     ais_coverage_confidence: float | None = None,
 ) -> dict[str, Any]:
     """Run every stage. Returns plain dicts, ready for JSON or a template."""
+    # `now` IS FORWARDED, AND NOT FORWARDING IT WAS A CRASH.
+    #
+    # MEASURED DEFECT THIS FIXES (2026-08-29): association.associate() raises
+    #   "scene_time_utc is required when there are no EO contacts"
+    # because with no contact there is no frame time to propagate the AIS claims to.
+    # run_scene ACCEPTED a `now` argument for exactly this and then dropped it on the
+    # floor, so the guard could never be satisfied.
+    #
+    # WHY IT MATTERS: ConsoleBackend.set_source() recomputes immediately after
+    # switching. Switch the authority to VIDEO_STREAM before the sensor node has
+    # posted its first batch -- which is the normal state for the first few seconds of
+    # every run, and the state whenever an operator presses the button early -- and the
+    # recompute raised, the switch failed, and the authority stayed on RECORDED. The
+    # console then kept drawing the recorded scene's STATIC boxes while a healthy node
+    # posted contacts that were never promoted.
     associations = association.associate(
         contacts, tracks,
         camera_lat_deg=pose["lat_deg"],
@@ -96,6 +111,7 @@ def run_scene(
         boresight_deg_true=pose["boresight_deg_true"],
         fov_half_angle_deg=pose.get("fov_half_angle_deg", pose["hfov_deg"] / 2.0),
         max_range_m=pose["max_range_m"],
+        scene_time_utc=now,
     )
 
     tracks_by_id = {t.track_id: t for t in tracks}

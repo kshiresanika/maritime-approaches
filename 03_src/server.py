@@ -358,6 +358,21 @@ class ConsoleBackend:
         self._last_by_kind: dict[str, list[EoContact]] = {}
         self._last_seen_by_kind: dict[str, datetime] = {}
 
+        # PER NODE, NOT PER KIND — THIS IS WHAT MAKES A SECOND CAMERA POSSIBLE.
+        #
+        # _last_by_kind buffers ONE list per SensorKind, and ingest() replaced
+        # live_contacts wholesale. Two cameras both posting kind="video_stream" —
+        # which is exactly what a two-camera rig is — therefore erased each other on
+        # every post: whichever node posted last WAS the picture, and the other might
+        # as well have been switched off. source_switch.accepts() gates on KIND, so
+        # both were legitimately promoted; nothing anywhere reported the loss.
+        #
+        # Keyed by node_id, with the time of the post, so a node that stops publishing
+        # ages out of the fused picture instead of freezing its last contacts into it
+        # forever. That staleness rule is the same one the console applies to the
+        # sensor strip, read from the same constant.
+        self._live_by_node: dict[str, tuple[datetime, list[EoContact]]] = {}
+
         # Existing audit lines, counted ONCE. The trail is append-only across runs on
         # purpose: a restart mid-demo must not reset the record of what the operator
         # already decided.
@@ -1028,11 +1043,36 @@ class ConsoleBackend:
                 self.source.note_demoted(node_id, kind)
                 return  # buffered above; not in the picture. No recompute, no events.
 
-            self._demo.live_contacts = contacts
+            # ACCUMULATE, DO NOT REPLACE. See _live_by_node's note: assigning
+            # live_contacts here made the picture whichever camera posted last.
+            self._live_by_node[node_id] = (_now(), list(contacts))
+            self._demo.live_contacts = self._fuse_live_contacts()
             self._demo.mode = "live"
             for c in contacts:
                 self._contact_node[c.contact_id] = node_id
         await self.recompute(reason=f"ingest:{node_id}")
+
+    def _fuse_live_contacts(self, *, stale_after_s: float | None = None) -> list[EoContact]:
+        """
+        Every currently-live node's contacts, as ONE list.
+
+        Called with the lock held. Nodes whose last post is older than the staleness
+        window are dropped rather than contributing stale geometry — a camera that
+        stopped ten seconds ago is not seeing anything now, and letting its last frame
+        persist would put a vessel on the map that nobody is looking at.
+
+        Contact ids must already be unique ACROSS nodes; pi_sensor.py namespaces them
+        with its node_id for exactly this reason. Two cameras that both call their
+        first track "pi-1" would collide here and one hull would silently vanish.
+        """
+        limit = stale_after_s if stale_after_s is not None else self._node_stale_after_s
+        now = _now()
+        fused: list[EoContact] = []
+        for nid, (seen, cs) in list(self._live_by_node.items()):
+            if limit and (now - seen).total_seconds() > limit:
+                continue
+            fused.extend(cs)
+        return fused
 
     async def note_heartbeat(self, *, node_id: str, kind: SensorKind,
                              measured_fps: float | None) -> None:
@@ -1075,7 +1115,11 @@ class ConsoleBackend:
                 # not "live", so the scene comes back with no reload from disk.
                 self._demo.mode = "replay"
             else:
-                buffered = self._last_by_kind.get(kind, [])
+                # Prefer the fused per-node view; fall back to the per-kind buffer
+                # so a switch still works before any node has posted under the new
+                # scheme (and for kinds that only ever had one node).
+                fused = self._fuse_live_contacts()
+                buffered = fused or self._last_by_kind.get(kind, [])
                 self._demo.mode = "live"
                 self._demo.live_contacts = buffered
                 for c in buffered:
@@ -1849,15 +1893,40 @@ def create_app(
             # frame beneath them. Checked by path rather than by a flag: a flag can be
             # passed for a video that is nothing of the kind, and this claim is one the
             # operator will trust.
+            # THE CHECK IS THE FILE, NOT THE DIRECTORY, AND THAT DISTINCTION IS THE
+            # WHOLE DEFECT.
+            #
+            # MEASURED DEFECT THIS FIXES (2026-08-29): comparing the PARENT DIRECTORY
+            # meant scene_detector.mp4 passed as "the scene's own rendering", because
+            # it lives in the scene directory too. But the two cuts are not the same
+            # video. The RECORDED cut draws every hull at its contact's own bbox_px,
+            # so the boxes land on it. The DETECTOR cut places hulls by
+            # h/tan(depression) and DRIFTS them. Show the detector cut while RECORDED
+            # is the authority and the console paints the recorded cut's static boxes
+            # over moving hulls -- boxes that never move and never line up -- while
+            # this function reassured the operator that "this imagery was rendered
+            # from the very contacts drawn over it".
+            #
+            # That is worse than no message. The whole point of video_sync is to catch
+            # exactly this, and a directory-level check made it endorse it.
             try:
-                own = (video_source is not None
-                       and isinstance(video_source, str)
-                       and Path(video_source).resolve().parent == scene_dir.resolve())
+                vs = Path(video_source).resolve() if isinstance(video_source, str) else None
+                own = vs is not None and vs == (scene_dir / "scene.mp4").resolve()
+                detector_cut = (
+                    vs is not None
+                    and vs.parent == scene_dir.resolve()
+                    and vs.name.startswith("scene_detector"))
             except OSError:
-                own = False
+                own = detector_cut = False
             if own:
                 return ("scene rendering: this imagery was rendered from the very "
                         "contacts drawn over it. Synthetic — no camera observed it.")
+            if detector_cut:
+                return ("WRONG CUT: this is the DETECTOR cut, whose hulls drift, but "
+                        "RECORDED is the authority so the boxes are the STATIC cut's "
+                        "pixel positions. They will never move and never line up. "
+                        "Switch the source to VIDEO_STREAM (and run the node), or "
+                        "show scene.mp4 instead.")
             return ("UNRELATED IMAGERY: the contacts on screen come from the RECORDED "
                     "scene, not from this video. The boxes do NOT belong to the frame "
                     "beneath them. Switch the source to VIDEO_STREAM to make the "
