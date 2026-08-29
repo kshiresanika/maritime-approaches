@@ -501,6 +501,15 @@ examples
     p.add_argument("--web", default=str(_SRC / "web"),
                    help="console directory. 03_src/web is the WebSocket console; "
                         "04_demo/web is the polling fallback page.")
+    p.add_argument("--ais-coverage-confidence", type=float, default=None,
+                   help="0-1. How complete is AIS coverage in this sector? Gates the "
+                        "DARK path: below 0.75 every dark verdict defers, because a "
+                        "receiver hole and a switched-off transponder look identical. "
+                        "Omitted = verdict.py's conservative 0.70, which is BELOW that "
+                        "threshold, so EVERY dark verdict defers. Correct for real "
+                        "Baltic data; wrong for a synthetic scene whose coverage is "
+                        "complete by construction. MEASURE it for a real sector "
+                        "(ais_trajectory.detect_gaps) rather than picking one.")
     p.add_argument("--no-browser", action="store_true")
     p.add_argument("--allow-real-identities", action="store_true",
                    help="DANGEROUS. Leave off for anything a judge or camera can see.")
@@ -558,6 +567,11 @@ examples
         node_stale_after_s=8.0,
         initial_source="RECORDED",
         startup_tasks=startup_tasks,
+        # Handed to the factory rather than set on the backend afterwards, because the
+        # lifespan runs one recompute at startup: set it later and the FIRST picture a
+        # browser sees was computed under a different assumption from every later one,
+        # with nothing on screen saying so.
+        ais_coverage_confidence=args.ais_coverage_confidence,
     )
 
     node_proc = start_local_node(args, args.port) if args.camera is not None else None
@@ -576,6 +590,11 @@ examples
                                 f"{len(replay.tracks)} reports"))
     print(f"  local node   " + (f"camera {args.camera}, scale {args.scale:g}"
                                 if node_proc else "none (Pi posts on its own)"))
+    print(f"  AIS coverage " + (
+        f"{args.ais_coverage_confidence:.2f} (stated by you)"
+        if args.ais_coverage_confidence is not None
+        else "0.70 default — BELOW the 0.75 sparse threshold, so every DARK verdict "
+             "will defer. Pass --ais-coverage-confidence if you know better."))
     print(f"  identities   " + ("REAL PERMITTED on /evidence?allow_real=1"
                                 if args.allow_real_identities
                                 else "pseudonymised on every outbound route"))

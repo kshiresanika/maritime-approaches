@@ -86,6 +86,7 @@ def run_scene(
     pose: dict[str, Any],
     *,
     now: datetime | None = None,
+    ais_coverage_confidence: float | None = None,
 ) -> dict[str, Any]:
     """Run every stage. Returns plain dicts, ready for JSON or a template."""
     associations = association.associate(
@@ -118,7 +119,27 @@ def run_scene(
     # lane D, and discarding it at the seam is what enforces that. Everything lane D
     # legitimately needs from it comes back through limitation_strings() below, as
     # list[str], which is what EvidenceRecord.limitations is declared as.
-    decided = verdict_mod.decide_all(associations, results_by_assoc, decided_at_utc=now)
+    # HOW CONFIDENT ARE WE THAT AIS COVERAGE HERE IS COMPLETE? It gates the DARK path:
+    # below verdict.SPARSE_COVERAGE_THRESHOLD every dark verdict raises
+    # `sparse_ais_coverage` and defers, because an AIS gap caused by a receiver hole is
+    # indistinguishable from one caused by a switched-off transponder, and calling the
+    # second when it was the first is the accusation this project must not make.
+    #
+    # Passing None keeps verdict.py's own conservative default (0.70), which is BELOW
+    # the threshold -- so a caller that says nothing gets universal deferral on the dark
+    # path. That is the right default for real Baltic data and the wrong one for a
+    # synthetic scene whose coverage is complete by construction, and until now there
+    # was no way to say which you had. There is now, and the value travels into the
+    # evidence record so a reader can see what was assumed.
+    #
+    # MEASURE IT, do not pick it: ais_trajectory.detect_gaps() over a slice bounded by
+    # the camera's own field of view, with explained_by_area_exit and
+    # explained_by_sparse_coverage both reported. A number chosen to make a demo pass
+    # is worse than the conservative default it replaced.
+    kw: dict[str, Any] = {"decided_at_utc": now}
+    if ais_coverage_confidence is not None:
+        kw["ais_coverage_confidence"] = float(ais_coverage_confidence)
+    decided = verdict_mod.decide_all(associations, results_by_assoc, **kw)
     verdicts = [v for v, _explanation in decided]
 
     assoc_by_id = {a.association_id: a for a in associations}
@@ -156,6 +177,16 @@ def run_scene(
 
     return {
         "pose": pose,
+        # Stated on every result so the console, the case file and failure_modes.md all
+        # report the SAME assumption. An assumption that lives only in a default is one
+        # nobody can audit.
+        "ais_coverage_confidence": (
+            float(ais_coverage_confidence) if ais_coverage_confidence is not None
+            else verdict_mod.DEFAULT_AIS_COVERAGE_CONFIDENCE),
+        "ais_coverage_confidence_basis": (
+            "explicitly supplied by the caller" if ais_coverage_confidence is not None
+            else "verdict.DEFAULT_AIS_COVERAGE_CONFIDENCE — conservative default, "
+                 "BELOW SPARSE_COVERAGE_THRESHOLD, so every dark verdict defers"),
         "counts": {
             "tracks": len(tracks), "contacts": len(contacts),
             "associations": len(associations),

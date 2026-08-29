@@ -1395,6 +1395,7 @@ def create_app(
     node_stale_after_s: float,
     initial_source: str = DEFAULT_SOURCE,
     startup_tasks: "Sequence[Any]" = (),
+    ais_coverage_confidence: float | None = None,
 ):
     """
     Build the ASGI app.
@@ -1416,6 +1417,10 @@ def create_app(
                              node_stale_after_s=node_stale_after_s,
                              allow_real_identities=allow_real_identities,
                              initial_source=initial_source)
+    # Set BEFORE the lifespan's startup recompute, so the first picture a browser sees
+    # was computed under the same coverage assumption as every later one.
+    if ais_coverage_confidence is not None:
+        backend._demo.ais_coverage_confidence = float(ais_coverage_confidence)
 
     @asynccontextmanager
     async def lifespan(_app):

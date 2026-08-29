@@ -68,6 +68,9 @@ class State:
         self.live_contacts: list[EoContact] = []
         self.mode = "replay"
         self.last_update: str = ""
+        # None = use verdict.py's conservative default. Set it only from something
+        # measured for the sector; see run_pipeline.run_scene for why.
+        self.ais_coverage_confidence: float | None = None
         # ONE anonymiser for the whole run, never one per record. Anonymiser numbers by
         # FIRST-SEEN order, so a fresh instance per record allocates index 0 every time
         # and every hull on screen collapses to 999000001 -- correctly anonymised and
@@ -78,7 +81,8 @@ class State:
         assert self.scene is not None
         contacts = self.live_contacts if self.mode == "live" else self.scene["contacts"]
         result = run_pipeline.run_scene(
-            self.scene["tracks"], contacts, self.scene["manifest"]["pose"])
+            self.scene["tracks"], contacts, self.scene["manifest"]["pose"],
+            ais_coverage_confidence=self.ais_coverage_confidence)
         if self.scene["ground_truth"] and self.mode == "replay":
             result["scoring"] = run_pipeline.score_scene(
                 result, self.scene["ground_truth"])
