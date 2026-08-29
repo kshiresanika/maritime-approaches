@@ -57,7 +57,9 @@ and a Verdict that changes under a PriorityScore's feet is a bug nobody will fin
 48 hours. Build a new object instead of mutating one.
 """
 
-from typing import Literal
+# Annotated is required for the discriminated union in section 8: the
+# discriminator is attached as Field metadata on the union type itself.
+from typing import Annotated, Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
@@ -444,3 +446,349 @@ class EvidenceRecord(_Contract):
         description='The "honest limits" half of criterion 4. Seed from '
                     "verdict.defer_reasons and from every None above that mattered.")
     pipeline_version: str
+
+
+# ================================================================================
+# 8. THE LIVE-CONSOLE LAYER.  Added 2026-08-29.  EXTENSION ONLY — nothing in
+#    sections 1-7 was renamed, retyped or reordered by this addition.
+#
+# WHY A SECTION 8 EXISTS AT ALL
+# Sections 1-7 describe ONE BATCH PASS: frames and claims go in, an EvidenceRecord
+# comes out. The operator console is a second consumer of those same objects with a
+# structurally different need — it is a LONG-LIVED VIEW that has to survive a browser
+# refresh at 14:03 on Sunday with a judge standing behind the laptop. Three properties
+# follow from that, and they are the only reason these models exist:
+#
+#   * ORDERING. A WebSocket delivers what it delivers. A dropped or reordered event
+#     must be DETECTABLE, not merely unlikely. Every event carries a monotonic `seq`,
+#     so the console can say "I last saw 412" and know whether it missed 413. Without
+#     it, a lost queue_update leaves a stale ranking on screen and nothing anywhere
+#     raises — the operator is looking at a ranking the pipeline no longer holds.
+#   * RECOVERY. A refresh must not produce an empty page. ConsoleState is the entire
+#     picture in one message, and it carries the `last_seq` it corresponds to, so the
+#     client resumes the stream at a known point rather than guessing and silently
+#     double-applying or skipping events.
+#   * PROVENANCE OF THE PICTURE. A contact on screen with no sensor behind it is an
+#     unattributable claim, and criterion 4 is about attributable ones. SensorNode
+#     says which sensor produced what and whether that sensor was alive at the time,
+#     so "the queue went quiet" can be distinguished from "the Pi died" — those are
+#     opposite findings and they look identical on a map.
+#
+# THE CLAIMED/OBSERVED WALL STILL HOLDS HERE, and it is load-bearing.
+# No event on this stream merges a claim into an observation. `contact_update` carries
+# `ais_track` and `eo_contact` as TWO SEPARATE OPTIONAL FIELDS for exactly the reason
+# section 1 gives, and which side is None is still the finding. A single merged
+# "vessel" payload would be the easiest thing in the world to write for a UI — and it
+# would delete criterion 3 from the product without producing a single error.
+#
+# STILL ZERO LOGIC, AND STILL NO WEB FRAMEWORK.
+# No serialisation helpers, no dispatch tables, no FastAPI import — not even a
+# TypeAdapter instance. This file must stay importable by `pi_sensor.py` on a
+# Raspberry Pi that has no web stack installed at all; one FastAPI import here and the
+# edge node stops booting for a reason that will take an hour to find at 03:00.
+# To parse an inbound event, the console lane writes ONE line in its OWN module:
+#
+#     from pydantic import TypeAdapter
+#     _EVENTS = TypeAdapter(StreamEvent)          # lane E's module, not this file
+#     event = _EVENTS.validate_json(raw_ws_message)
+#
+# That line belongs to lane E because the transport is lane E's choice.
+#
+# ISO TIMESTAMPS FOR THE BROWSER
+# `sent_at_utc` follows the project's `_utc` convention and is an AwareDatetime, which
+# pydantic serialises to ISO-8601 in `model_dump_json()`. That is the wire format the
+# browser reads with `new Date(...)`. The naive-datetime rejection from section 1
+# therefore also protects the console: a naive timestamp would reach the browser
+# without a zone and be silently interpreted as LOCAL time, shifting every event on
+# the timeline by two hours in Hamburg in August. It fails at the boundary instead.
+# ================================================================================
+
+SensorKind = Literal[
+    "edge_pi",     # Raspberry Pi at the water's edge, classical CV, NO AIS access
+    "mac_camera",  # the MacBook camera — the T2 live path
+    "file",        # a recorded scene replayed from disk — the T1 guaranteed path
+]
+
+OperatorActionType = Literal[
+    "DISPATCH",  # the operator RECORDED a decision to send an asset. The system does
+                 # not send anything and has no channel to. Decision support, never
+                 # automated enforcement — this vocabulary is where that rule is
+                 # visible in the data.
+    "WATCH",     # keep it on screen, do not spend the asset yet
+    "DISMISS",   # judged not worth the asset. Recorded, not deleted: a dismissal is
+                 # part of the case file, and "what the operator chose not to chase"
+                 # is exactly what an after-action review asks for.
+    "EXPORT",    # emit the evidence record. The one action with an artefact.
+]
+
+StreamEventType = Literal[
+    "contact_update",
+    "verdict_update",
+    "queue_update",
+    "node_status",
+    "operator_action_ack",
+]
+
+
+class SensorNode(_Contract):
+    """
+    One sensor feeding the picture, and whether it was alive.
+
+    WHY `online` AND `last_seen` ARE BOTH HERE and neither is derived from the other:
+    `online` is the shore station's current belief; `last_seen` is the evidence for
+    that belief. An operator who sees "online" alone cannot tell a healthy node from
+    a stale flag nobody cleared. Showing both makes the staleness visible, and a
+    quiet queue stops being ambiguous — a node last seen 40 seconds ago that reports
+    online is a genuinely empty sea, the same node last seen 11 minutes ago is a dead
+    sensor being mistaken for one.
+    """
+
+    node_id: str
+    kind: SensorKind
+    online: bool = Field(
+        description="The shore station's CURRENT belief about reachability. Not "
+                    "derived from last_seen here — deriving it is lane E's policy "
+                    "call, and a threshold in this file would be logic.")
+    last_seen: AwareDatetime | None = Field(
+        default=None,
+        description="Time of the most recent message from this node. None means NEVER "
+                    "HEARD FROM — a node that is configured but has not reported once. "
+                    "Substituting 'now' for an unheard node would make a dead sensor "
+                    "look healthy on the strip, which is the one thing this field is "
+                    "for.")
+    measured_fps: float | None = Field(
+        default=None, ge=0.0,
+        description="MEASURED, never nominal, never configured. None until something "
+                    "actually counted frames. CLAUDE.md: measured numbers only — a "
+                    "declared 30 next to a node delivering 4 is how a demo gets "
+                    "questioned on stage and has no answer.")
+
+
+class OperatorAction(_Contract):
+    """
+    What a HUMAN decided. Recorded, never executed.
+
+    This object is the audit trail that makes 'decision support, not automated
+    enforcement' checkable rather than merely stated: every entry names an operator
+    and a time, and there is deliberately no field anywhere in this file for a machine
+    to record a decision of its own. If it happened, a person chose it.
+    """
+
+    action: OperatorActionType
+    contact_id: str = Field(
+        description="The id the console displayed and the operator acted on. Must be "
+                    "traceable back to an EoContact / Association, or the action "
+                    "cannot be tied to the evidence that prompted it and the audit "
+                    "trail has a hole in the middle of it.")
+    operator_id: str = Field(
+        description="WHO decided. An unattributed dispatch order is not a decision "
+                    "record, it is an anonymous one.")
+    action_time_utc: AwareDatetime = Field(
+        description="WHEN they decided — which is not when the verdict was computed. "
+                    "The gap between Verdict.decided_at_utc and this is operator "
+                    "reaction time, and an after-action review asks for it.")
+    note: str | None = Field(
+        default=None,
+        description="Free text from the operator. Human-written by definition — the "
+                    "LLM has no route to this field, exactly as it has no route to a "
+                    "Verdict.")
+
+
+# --------------------------------------------------------------------------------
+# 8b. The stream events.
+#
+# One base class carries the two fields that make the stream recoverable; each
+# variant adds only its payload. The `event` tag is the pydantic discriminator, so an
+# unknown or mistyped tag fails at validation instead of falling through to a default
+# branch in the console's JavaScript and rendering nothing.
+# --------------------------------------------------------------------------------
+
+class _StreamEventBase(_Contract):
+    """Shared envelope. Never sent on its own — only its subclasses appear on the
+    wire."""
+
+    seq: int = Field(
+        ge=0,
+        description="MONOTONIC per connection, gap-free. The console compares it "
+                    "against the last seq it applied; a gap means it missed an event "
+                    "and must re-request ConsoleState rather than keep painting. "
+                    "Without this a lost queue_update leaves a stale ranking on "
+                    "screen and nothing anywhere raises.")
+    sent_at_utc: AwareDatetime = Field(
+        description="Server send time, ISO-8601 on the wire. Distinct from the "
+                    "payload's own timestamps: sent_at_utc says when the console was "
+                    "TOLD, the payload says when the thing HAPPENED. Conflating them "
+                    "makes pipeline latency invisible.")
+
+
+class ContactUpdateEvent(_StreamEventBase):
+    """
+    One contact's current state.
+
+    THE WALL, ON THE WIRE. `ais_track` and `eo_contact` are separate optional fields,
+    never a merged 'vessel'. Which side is None is still the finding:
+        ais_track None   -> observation with no claim  -> the DARK case
+        eo_contact None  -> claim with no observation  -> the position-spoof case
+    A UI-shaped merged payload would be the easiest thing here to write and would
+    silently remove the comparison that criterion 3 consists of.
+    """
+
+    event: Literal["contact_update"] = "contact_update"
+    association: Association | None = Field(
+        default=None,
+        description="None before the associator has run on this contact. The console "
+                    "must be able to draw a fresh detection before it is adjudicated, "
+                    "or the map lags the sea by a pipeline pass.")
+    eo_contact: EoContact | None = None
+    ais_track: AisTrack | None = None
+    node_id: str | None = Field(
+        default=None,
+        description="Which SensorNode produced the observation. Transport-level "
+                    "provenance, deliberately kept OFF EoContact: the contact object "
+                    "is what the camera saw, and which box it was plugged into is not "
+                    "an observed property of the vessel.")
+
+
+class VerdictUpdateEvent(_StreamEventBase):
+    """
+    A verdict, with the comparisons that produced it.
+
+    The mismatches ride along on purpose: the console has to show the operator
+    CLAIMED 'fishing, 40 m' versus OBSERVED 'tanker, 248 m' at the moment the verdict
+    lands. Making it fetch them separately means the screen can display a SPOOF label
+    with no evidence beside it during the round trip — a bare accusation, which is
+    the exact output criterion 4 forbids.
+    """
+
+    event: Literal["verdict_update"] = "verdict_update"
+    verdict: Verdict
+    mismatches: list[Mismatch] = Field(
+        default_factory=list,
+        description="Embedded snapshots, matching Verdict.mismatch_ids. Empty is "
+                    "legitimate for a MATCH and for a DARK contact — there was "
+                    "nothing to compare against.")
+
+
+class QueueUpdateEvent(_StreamEventBase):
+    """
+    The ranked queue — criterion 2 on screen.
+
+    The WHOLE queue is sent, not a delta. A ranking is a total order: if entry 3 is
+    patched in isolation, the console is showing an order the prioritiser never
+    produced, and 'send the boat here' stops being defensible. Whole-list replacement
+    makes that class of bug impossible rather than rare.
+    """
+
+    event: Literal["queue_update"] = "queue_update"
+    queue: list[PriorityScore] = Field(
+        default_factory=list,
+        description="Each entry carries its own rank plus component_scores and "
+                    "component_weights, so the console can show WHY one contact "
+                    "outranks another without recomputing anything. The weighting is "
+                    "the argument; it travels with the score.")
+
+
+class NodeStatusEvent(_StreamEventBase):
+    """A sensor came up, went down, or re-reported its measured rate."""
+
+    event: Literal["node_status"] = "node_status"
+    node: SensorNode
+
+
+class OperatorActionAckEvent(_StreamEventBase):
+    """
+    Confirmation that an operator's decision was RECORDED. Never that it was carried
+    out — nothing in this system carries anything out.
+
+    `accepted=False` matters more than it looks: a dispatch order that silently failed
+    to persist leaves the operator believing a decision is on the record when it is
+    not, and the audit trail then disagrees with the person who was there.
+    """
+
+    event: Literal["operator_action_ack"] = "operator_action_ack"
+    action: OperatorAction
+    accepted: bool = Field(
+        description="True = written to the record. NOT 'the asset was tasked'. There "
+                    "is no field on this object for an outcome because the system has "
+                    "no mechanism to produce one.")
+    detail: str | None = Field(
+        default=None,
+        description="Why it was rejected, when it was. Empty on success.")
+
+
+StreamEvent = Annotated[
+    ContactUpdateEvent
+    | VerdictUpdateEvent
+    | QueueUpdateEvent
+    | NodeStatusEvent
+    | OperatorActionAckEvent,
+    Field(discriminator="event"),
+]
+"""
+The discriminated union pushed over the WebSocket.
+
+WHY DISCRIMINATED AND NOT A PLAIN UNION: pydantic tries a plain union member by
+member and accepts the first that validates, so an event whose tag says
+`queue_update` but whose body looks like a node_status would be accepted as the
+wrong type — no error, wrong panel updates. The discriminator makes the tag
+authoritative: an unknown or mistyped tag raises at the boundary, where it is one
+line to find, instead of surfacing as a console that mysteriously stops updating.
+
+Parse with a TypeAdapter in the consuming module, not here — see the section 8
+header for why this file must stay free of that.
+"""
+
+
+class ConsoleState(_Contract):
+    """
+    The full snapshot the console needs on first connect.
+
+    WHY THIS EXISTS AT ALL: a browser refresh mid-demo is not a hypothetical — it is
+    what happens when the display flickers, the laptop sleeps, or a judge asks to see
+    it on the big screen. An event stream alone cannot recover from that, because the
+    events that built the current picture are already gone. Without this object a
+    refresh at minute three of a four-minute pitch shows an empty page, and the only
+    recovery is re-running the pipeline on stage.
+
+    `last_seq` is the join between snapshot and stream: the client applies this state,
+    then ignores every buffered event with seq <= last_seq. Without it the client
+    either double-applies events it already has baked into the snapshot or skips ones
+    it does not — and both look like a UI bug rather than a protocol bug, which is
+    how an hour disappears.
+
+    WHY EvidenceRecord AND NOT A FLAT LIST OF VERDICTS: EvidenceRecord already embeds
+    the verdict, its mismatches, the claim, the observation and the priority as
+    immutable snapshots (section 7). Re-listing those here would create a second copy
+    that can disagree with the first. One source of truth, already frozen.
+    """
+
+    state_time_utc: AwareDatetime
+    last_seq: int = Field(
+        ge=0,
+        description="The seq of the last event folded into this snapshot. The client "
+                    "resumes at last_seq + 1. See the class docstring for what breaks "
+                    "without it.")
+    pipeline_version: str = Field(
+        description="So a stale browser tab left open from the previous run is "
+                    "identifiable as stale rather than believed.")
+
+    nodes: list[SensorNode] = Field(
+        default_factory=list,
+        description="Empty means no sensor is configured — which is a different "
+                    "finding from a sensor that is configured and offline, and the "
+                    "console must be able to say which.")
+    records: list[EvidenceRecord] = Field(
+        default_factory=list,
+        description="Adjudicated contacts, each self-contained. The ranked queue is "
+                    "reconstructible from record.priority.rank — deliberately not "
+                    "duplicated into a second ordered field that could drift out of "
+                    "agreement with it.")
+    unresolved_contacts: list[EoContact] = Field(
+        default_factory=list,
+        description="Seen but not yet adjudicated. Without these the map is blank for "
+                    "every fresh detection until a verdict exists, and the operator "
+                    "reads an empty screen as an empty sea.")
+    recent_actions: list[OperatorAction] = Field(
+        default_factory=list,
+        description="So a refresh does not lose 'I already dismissed that one' and "
+                    "re-present a contact the operator has already judged.")

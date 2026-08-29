@@ -45,7 +45,8 @@ for p in (str(_SRC), str(_HERE)):
         sys.path.insert(0, p)
 
 import run_pipeline                          # noqa: E402
-from contracts import EoContact              # noqa: E402
+import evidence as evidence_mod              # noqa: E402
+from contracts import EoContact, EvidenceRecord  # noqa: E402
 from prioritizer import DEMO_INFRASTRUCTURE, Asset  # noqa: E402
 
 WEB = _HERE / "web"
@@ -67,6 +68,11 @@ class State:
         self.live_contacts: list[EoContact] = []
         self.mode = "replay"
         self.last_update: str = ""
+        # ONE anonymiser for the whole run, never one per record. Anonymiser numbers by
+        # FIRST-SEEN order, so a fresh instance per record allocates index 0 every time
+        # and every hull on screen collapses to 999000001 -- correctly anonymised and
+        # sixteen vessels merged into one, which looks right and is not.
+        self.anon = evidence_mod.Anonymiser()
 
     def recompute(self) -> None:
         assert self.scene is not None
@@ -120,6 +126,36 @@ class Handler(BaseHTTPRequestHandler):
                 if STATE.result is None:
                     STATE.recompute()
                 body = dict(STATE.result or {})
+                # PSEUDONYMISE BEFORE ANYTHING LEAVES THIS PROCESS.
+                #
+                # run_scene returns records carrying REAL claimed_mmsi / name / imo /
+                # callsign, and this handler served them verbatim. server.py closed this
+                # hole; app.py did not get the fix -- and app.py is the REHEARSED
+                # FALLBACK, the thing you switch to when FastAPI fails at the venue. So
+                # the failure mode was: dependency problem on the morning, fall back to
+                # the safety net, and the safety net is the one that leaks.
+                #
+                # Invisible on the synthetic scene because those identities are already
+                # 999-prefixed, which is precisely what makes it dangerous: it stays
+                # quiet until someone points this at the real Fehmarn golden window and
+                # a real named vessel appears on a projector under a SPOOF badge. That
+                # is the project's one non-negotiable rule, and it is defamatory.
+                #
+                # record_to_dict runs assert_no_real_identities() over the SERIALISED
+                # payload, so each record served is verified rather than merely
+                # processed. A record that fails is dropped, not shipped -- silence is
+                # the correct failure direction here.
+                scrubbed = []
+                for r in body.get("records", []):
+                    try:
+                        rec = EvidenceRecord.model_validate(r)
+                        scrubbed.append(evidence_mod.record_to_dict(
+                            rec, anonymiser=STATE.anon)["record"])
+                    except Exception as exc:      # noqa: BLE001
+                        scrubbed.append({"record_id": r.get("record_id", "?"),
+                                         "error": f"withheld: {exc}"})
+                body["records"] = scrubbed
+                body["identities"] = "PSEUDONYMISED"
                 body["last_update"] = STATE.last_update
             self._json(200, body)
         else:

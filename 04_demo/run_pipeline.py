@@ -104,12 +104,22 @@ def run_scene(
     # position test rather than the pooled one. Without it the check falls back to
     # comparing a total gap against a sigma dominated by monocular range error, which
     # the harness showed cannot detect a real position spoof.
-    mismatches_by_assoc = consistency.check_all(
+    # check_all returns dict[association_id -> ConsistencyResult]. The RESULT, not a
+    # bare mismatch list: verdict.py caps MATCH confidence by evidential coverage, which
+    # it computes from agreements + mismatches + uncomparable. Hand it only the
+    # mismatches and every honest vessel reads coverage 0.0 and comes back UNKNOWN.
+    results_by_assoc = consistency.check_all(
         associations, tracks_by_id, contacts_by_id,
         camera=(pose["lat_deg"], pose["lon_deg"]))
 
-    verdicts = verdict_mod.decide_all(
-        associations, mismatches_by_assoc, tracks_by_id, contacts_by_id, now=now)
+    # decide_all takes (associations, results) and returns
+    # list[tuple[Verdict, VerdictExplanation]]. The explanation half is lane C internal
+    # and is DROPPED HERE DELIBERATELY -- verdict.py:302 states it must not cross into
+    # lane D, and discarding it at the seam is what enforces that. Everything lane D
+    # legitimately needs from it comes back through limitation_strings() below, as
+    # list[str], which is what EvidenceRecord.limitations is declared as.
+    decided = verdict_mod.decide_all(associations, results_by_assoc, decided_at_utc=now)
+    verdicts = [v for v, _explanation in decided]
 
     assoc_by_id = {a.association_id: a for a in associations}
     tracks_by_assoc = {
@@ -128,12 +138,21 @@ def run_scene(
     for p in priorities:                       # already in rank order
         v = verdict_by_id[p.verdict_id]
         a = assoc_by_id[v.association_id]
+        result = results_by_assoc.get(v.association_id)
         records.append(evidence_mod.build_record(
             verdict=v, association=a,
-            mismatches=mismatches_by_assoc.get(v.association_id, []),
+            mismatches=result.mismatches if result else [],
             track=tracks_by_assoc.get(v.association_id),
             contact=contacts_by_assoc.get(v.association_id),
-            priority=p, behaviour_notes=notes.get(v.verdict_id), now=now))
+            priority=p, behaviour_notes=notes.get(v.verdict_id),
+            # CRITERION 4'S HONESTY CHANNEL, previously severed. Without this the record
+            # declares it has no stated calibration basis -- which was true, because
+            # limitation_strings() existed and nothing called it. It is what carries
+            # "these dimensions could NOT be checked" into the case file. A report
+            # listing four agreeing dimensions while silently having compared two is not
+            # evidence-grade, it is a misleading one.
+            consistency_limitations=verdict_mod.limitation_strings(result, v),
+            now=now))
 
     return {
         "pose": pose,

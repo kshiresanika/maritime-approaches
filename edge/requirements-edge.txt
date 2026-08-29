@@ -1,0 +1,33 @@
+# edge/requirements-edge.txt — ONLY what the sensor node needs. Not the dev set.
+#
+# WHY A SEPARATE FILE. The Mac venv carries geopandas, movingpandas, shapely, pyproj,
+# scikit-learn, pyais and folium. None of that runs on the Pi and several have no
+# aarch64 wheel, so `pip install -r` of the project set on a Pi spends twenty minutes
+# building and then fails. This file is the edge subset and nothing more.
+#
+# NOT PIP-INSTALLABLE — INSTALL WITH APT FIRST:
+#   sudo apt update
+#   sudo apt install -y python3-picamera2 python3-opencv python3-numpy
+# picamera2 ships as an APT package into the SYSTEM interpreter and is not usefully
+# available on PyPI. If you use a venv it MUST be created with --system-site-packages
+# or the import fails for a packaging reason that looks like a hardware fault.
+#
+# THEN:
+#   pip3 install --break-system-packages -r edge/requirements-edge.txt
+#
+# BIGGEST RISK IN THIS FILE: ultralytics pulls torch, which on aarch64 is a ~200 MB
+# download and several minutes of install. DO THIS BEFORE THE VENUE, not on contested
+# hackathon wifi. If it fails or is too slow, 04_demo/pi_sensor.py needs none of it.
+
+ultralytics>=8.3,<9        # YOLO. Pulls torch + torchvision transitively.
+fastapi>=0.110             # /stream, /health. Brings pydantic v2, which lets
+                           # sensor_node.py validate EoContact on the Pi itself.
+uvicorn>=0.27              # ASGI server. No [standard] extra: uvloop/httptools are
+                           # C builds we do not need for one MJPEG stream.
+
+# DELIBERATELY ABSENT, so nobody adds them back "for consistency":
+#   opencv-python  -> use the APT python3-opencv; the wheel rebuilds for hours on a Pi
+#   numpy          -> comes with python3-opencv and picamera2; a second copy can shadow
+#                     the one picamera2 was built against and break array interop
+#   requests       -> urllib in the stdlib does the POST; one fewer thing to install
+#   pandas, geopandas, shapely, pyproj, movingpandas, scikit-learn, pyais, folium

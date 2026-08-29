@@ -208,7 +208,13 @@ CLASS_GROUP = {"cargo": "large_commercial", "tanker": "large_commercial",
                "fishing": "small_craft", "tug": "small_craft",
                "small_craft": "small_craft", "unknown": "unknown"}
 
-# See the UNCALIBRATED CONFIDENCE section. 0.95 -> 1.645 sigma, below the 2.0 floor.
+# See the UNCALIBRATED CONFIDENCE section. MEASURED under lane C's current log-odds
+# mapping: 0.95 -> ln(0.95/0.05) = 2.944 nats, below lane C's 3.5 nat class floor. So an
+# uncalibrated model is structurally inert -- it cannot raise a class mismatch, and
+# therefore cannot influence a verdict -- until agreement is MEASURED on real crops.
+# The older comment here said "1.645 sigma, below the 2.0 floor", which was arithmetic
+# from a mapping lane C had already replaced. Both halves were wrong; the conclusion
+# happened to survive only because lane C's floor was raised to restore it.
 UNCALIBRATED_CONFIDENCE_CEILING = 0.95
 
 # --------------------------------------------------------------------------------
@@ -873,7 +879,8 @@ def format_score_report(rep: dict) -> str:
     lines += ["-" * 74,
               f"CONFIDENCE CEILING (Wilson 95% lower bound on exact agreement): "
               f"{rep['ceiling']:.4f}",
-              f"  -> lane C significance {z:.3f} sigma against its 2.0 floor",
+              f"  -> lane C significance {z:.3f} nats against its "
+              f"{LANE_C_CLASS_FLOOR_NATS:.1f} nat class floor",
               f"  -> a class mismatch {'CAN' if z >= 2.0 else 'CANNOT'} fire with this sample",
               ""]
     if z < 2.0:
@@ -899,19 +906,39 @@ def _pct(v):
     return "n/a" if v is None else f"{v:.1%}"
 
 
+# Lane C's class-dimension reporting floor, mirrored. Lane C remains the authority and
+# this module never imports it; this exists only so the scorer can tell the operator
+# what a given ceiling implies. IF LANE C MOVES ITS FLOOR, MOVE THIS.
+LANE_C_CLASS_FLOOR_NATS = 3.5
+
+
 def _sigma_for(p: float) -> float:
     """consistency.py's `_probability_to_sigma`, reproduced so this module can report
-    what a ceiling implies WITHOUT importing lane C. If lane C changes its mapping this
-    report goes stale — that is a deliberate trade against a cross-lane import."""
+    what a ceiling implies WITHOUT importing lane C.
+
+    THIS FUNCTION WAS STALE AND THE STALENESS WAS DANGEROUS, because its output is
+    printed to the operator as a safety property.
+
+    Observed: it reproduced the NORMAL QUANTILE. Claimed by lane C: log-odds, since
+    2026-08-29, when the normal quantile was found to make the class check
+    mathematically incapable of ever firing. Why the mismatch mattered: this module
+    told the operator that a 0.95 ceiling yields 1.645 and therefore "no class mismatch
+    can fire", while lane C was actually computing ln(0.95/0.05) = 2.944 and firing
+    against a 2.0 floor. The console asserted a guarantee the pipeline was not
+    honouring -- the worst kind of wrong, because it is reassuring.
+
+    Lane C has since put a dimension-specific floor at 3.5 nats, derived so that the
+    0.95 uncalibrated ceiling (2.944) and every confusable pair (max 3.453) sit below
+    it. With this function corrected, the report and the pipeline now agree, and the
+    inertness claim is true again for the right reason rather than by accident.
+
+    The docstring's original trade-off note stands and is worth keeping: reproducing
+    lane C rather than importing it means this report CAN go stale. It did. The cost of
+    the alternative -- a cross-lane import that pulls lane C onto every machine running
+    the VLM -- was still judged higher."""
     import math
-    p = min(max(p, 0.5), 0.9999)
-    q = 1.0 - p
-    if q <= 0.0:
-        return 4.0
-    t = math.sqrt(-2.0 * math.log(q))
-    num = 2.515517 + 0.802853 * t + 0.010328 * t * t
-    den = 1.0 + 1.432788 * t + 0.189269 * t * t + 0.001308 * t * t * t
-    return max(0.0, t - num / den)
+    p = min(max(p, 0.5), 0.999)
+    return round(math.log(p / (1.0 - p)), 4)
 
 
 def _n_needed_for_ceiling(target: float) -> int:

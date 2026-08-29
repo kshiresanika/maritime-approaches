@@ -254,8 +254,38 @@ class ClassicalDetector:
 # Emission.
 # ============================================================================
 
+def _classical_detection_confidence(area_px: float, frames: int,
+                                    min_area_px: int) -> float:
+    """How much this detector believes the box is a vessel at all. NEVER 1.0.
+
+    detection_confidence became a REQUIRED field of EoContact on 2026-08-29 and this
+    function did not have one to give, so every POST from this node was rejected with
+    HTTP 400 and the classical fallback -- the escape route for COCO 'boat' failing to
+    fire on a printed silhouette -- delivered nothing at all.
+
+    The tempting fix is to hardcode 1.0. That is worse than the bug: it tells lane C
+    every blob is a certain vessel, and detection_confidence feeds the DARK path, where
+    "a vessel is present and not transmitting" rests on the first half of that sentence
+    being true. A constant maximum would inflate every DARK confidence with a number
+    nobody measured, which breaks MEASURED NUMBERS ONLY silently and in the confident
+    direction.
+
+    A background-subtraction detector has exactly two pieces of evidence and no learned
+    score, so the value is built from those two and nothing else:
+      * how far above the noise floor the region is (area against min_area_px) -- a
+        blob at the floor is indistinguishable from the 6-22 px clutter the harness
+        deliberately plants in the same band;
+      * how many frames it survived -- a wave crest does not persist.
+    Saturating, floored at 0.30 and capped at 0.90: this detector is never certain and
+    the number must not be able to say otherwise."""
+    a = min(1.0, area_px / (4.0 * max(min_area_px, 1)))
+    f = min(1.0, frames / 15.0)
+    return round(0.30 + 0.60 * (0.5 * a + 0.5 * f), 4)
+
+
 def to_contact(det: dict, *, horizon_y: float, pose: dict, frame_w: int, frame_h: int,
-               scale: float, frame_time: datetime, frame_ref: str) -> dict:
+               scale: float, frame_time: datetime, frame_ref: str,
+               min_area_px: int = 120) -> dict:
     """
     One detection -> one EoContact-shaped dict.
 
@@ -283,6 +313,27 @@ def to_contact(det: dict, *, horizon_y: float, pose: dict, frame_w: int, frame_h
         length_sigma = max(1.0, length_m * math.sqrt(
             (rng_sigma / rng_m) ** 2 + (2.0 / max(det["w"], 1)) ** 2))
 
+    # SCALE IS NOW APPLIED. It was accepted, documented and never read, which meant the
+    # tabletop rig emitted TABLE-metres labelled as sea-metres: a 0.4 m model at
+    # --scale 20 reported an 0.4 m vessel, so every length check compared a claimed
+    # 180 m hull against 0.4 m and returned a colossal, confident, meaningless spoof.
+    # Silent corruption, the dd/mm/yyyy class -- no crash, just wrong numbers.
+    #
+    # Ranges and lengths are LINEAR in the scale factor and scale together. Bearings do
+    # NOT: an angle is dimensionless, so scaling it would be wrong. Uncertainties scale
+    # with the quantity they qualify, which keeps every sigma ratio -- and therefore
+    # every significance lane C computes -- invariant under the choice of scale. That
+    # invariance is the property that makes a tabletop rehearsal predict the real run.
+    #
+    # Default is 1.0, so a real coastal camera is unaffected.
+    if scale != 1.0:
+        if rng_m is not None:
+            rng_m *= scale
+            rng_sigma *= scale
+        if length_m is not None:
+            length_m *= scale
+            length_sigma *= scale
+
     return {
         "contact_id": f"pi-{det['track_id']}",
         "frame_time_utc": frame_time.isoformat(),
@@ -291,12 +342,19 @@ def to_contact(det: dict, *, horizon_y: float, pose: dict, frame_w: int, frame_h
         "observed_bearing_deg_true": round(true_brg, 3),
         "bearing_uncertainty_deg": round(b_unc, 3),
         "observed_bearing_rel_deg": round(max(-180.0, min(180.0, rel)), 3),
-        "observed_range_m": round(rng_m, 1) if rng_m else None,
-        "range_uncertainty_m": round(rng_sigma, 1) if rng_sigma else None,
+        # `is not None`, not truthiness: contracts.py is explicit that None means
+        # "not available" and never means zero. A vessel measured at range 0.0 or with
+        # a 0.0 sigma is a real measurement, and `if rng_m` would silently convert it
+        # into an absence -- which lane C reads as "uncomparable" rather than "known".
+        "observed_range_m": round(rng_m, 1) if rng_m is not None else None,
+        "range_uncertainty_m": round(rng_sigma, 1) if rng_sigma is not None else None,
         "observed_class": None,
         "observed_class_confidence": None,
-        "observed_length_m": round(length_m, 2) if length_m else None,
-        "observed_length_uncertainty_m": round(length_sigma, 2) if length_sigma else None,
+        "observed_length_m": round(length_m, 2) if length_m is not None else None,
+        "observed_length_uncertainty_m": (
+            round(length_sigma, 2) if length_sigma is not None else None),
+        "detection_confidence": _classical_detection_confidence(
+            det.get("area", det["w"] * det["h"]), int(det["frames"]), min_area_px),
         "observed_heading_deg_true": None,
         "observed_speed_ms": None,
         "track_length_frames": int(det["frames"]),

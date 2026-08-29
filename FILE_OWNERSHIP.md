@@ -1,7 +1,10 @@
 # FILE OWNERSHIP — EDTH Hamburg / Topic 02
 
-Four lanes: **A / B / C / D**, plus **ARCH** (Amol). *(Supersedes the earlier
-EO/AIS/FUSION/DECISION/PITCH draft — those lane names are dead.)*
+Six lanes: **A / B / C / D / E / F**, plus **ARCH** (Amol). *(Supersedes the earlier
+EO/AIS/FUSION/DECISION/PITCH draft — those lane names are dead.)* **E and F were added
+2026-08-29** and are carved OUT of lane D's original `04_demo/` blanket: D kept the
+pitch and the demo script, E took the operator console, F took the sensor node. If the
+team is small, one person holds D+E — but the files still have one owner each.
 
 One owner per file. Concurrent edits to one file are the top cause of a hackathon
 repo losing working code. To change a file you do not own, append to
@@ -17,6 +20,8 @@ repo losing working code. To change a file you do not own, append to
 | **B** | EO + Geometry | *What does the camera see, on what bearing, at roughly what range?* | Criterion 1 — the OBSERVED half |
 | **C** | Fusion + Verdict | *Does the claim match the observation, and if not, which way does it fail?* | **Criterion 3 (the discriminator)** + the verdict |
 | **D** | Evidence + Demo | *Which contact gets the boat, how sure are we, and can a judge follow it in four minutes?* | **Criterion 2 (highest weight)** + criterion 4 |
+| **E** | Console | *What does the watch officer see, and does it survive a refresh?* | Criteria 2 + 4, **on screen** |
+| **F** | Edge node | *What does the sensor at the water's edge actually observe, with no access to AIS?* | Criterion 1 — the OBSERVED half, in hardware |
 | **ARCH** | Amol | *Do the modules still fit together?* | The seams, and the rules |
 
 **D carries two criteria, including the one CLAUDE.md says most teams fail.** That is
@@ -68,9 +73,61 @@ body goes to D, not to A or B.** If the team is only 3, ARCH takes `04_demo/` an
 | `03_src/prioritizer.py` | **Criterion 2.** Highest-weight file in the repo |
 | `03_src/evidence.py` | |
 | `03_src/report.py` | The LLM writes the RATIONALE here, never the verdict |
-| `04_demo/` | Demo script, recording, rehearsed fallback |
+| `04_demo/` | Demo script, recording, rehearsed fallback — **except `app.py` and `web/` (lane E) and `pi_sensor.py` and `camera_pose_*.json` (lane F)** |
 | `05_pitch/` | Slides, one-pager, TRL declaration |
 | `99_scratch/handoff_D.md` | |
+
+### Lane E — Console
+
+The operator screen and the stream that feeds it. **Criteria 2 and 4 are judged on
+what is on this screen**, not on what `prioritizer.py` returns in a REPL — a ranking
+nobody can see is not a prioritisation step.
+
+| Path | Note |
+|---|---|
+| `04_demo/app.py` | The shore station: serves the page, pushes `StreamEvent`, answers with `ConsoleState` on connect. **Stdlib only** — a demo that needs a `pip install` on venue wifi is a demo that does not start |
+| `04_demo/web/` | `index.html` and anything beside it. **No CDN**, hand-drawn SVG plan view |
+| `99_scratch/handoff_E.md` | |
+
+Three rules that are E's alone to keep:
+
+1. **Never merge a claim and an observation into one screen object.** `ContactUpdateEvent`
+   carries `ais_track` and `eo_contact` as separate optional fields. A merged "vessel"
+   is the easiest thing in the world to write for a UI and it deletes criterion 3 from
+   the product without raising anything.
+2. **The verdict and the confidence are rendered, never computed here.** E displays
+   `Verdict.label`, `Verdict.confidence` and `defer_to_human`. A threshold in the
+   JavaScript is a second verdict engine that nobody versioned.
+3. **`ConsoleState.last_seq` is the refresh contract.** Apply the snapshot, drop every
+   buffered event with `seq <= last_seq`, resume at `last_seq + 1`. Skip it and the
+   console double-applies or silently misses events, which reads as a UI bug and costs
+   an hour.
+
+### Lane F — Edge node
+
+The camera at the water's edge. **This process has no AIS connection and nowhere to put
+an MMSI** — that is the demonstration, not an implementation detail. When a judge asks
+how you know the detector is not peeking at the claims, you point at the node.
+
+| Path | Note |
+|---|---|
+| `04_demo/pi_sensor.py` | The node. Classical CV, `observed_class` stays `None`, POSTs `EoContact`-shaped JSON |
+| `04_demo/camera_pose_*.json` | Measured pose for F's own rig. **The pose CONVENTION is lane B's** (`geometry.py`); F fills in measured values, it does not redefine the format |
+| `99_scratch/handoff_F.md` | |
+
+**F does not own `03_src/eo_detector.py`.** That is lane B's, and F consumes the same
+`EoContact` contract rather than forking a second detector — two detectors emitting the
+same type but disagreeing about what a contact is would be undiscoverable until the
+verdicts disagreed.
+
+Two rules that are F's alone to keep:
+
+1. **`measured_fps` is measured or it is `None`.** A nominal 30 next to a node
+   delivering 4 is how a demo gets questioned on stage with no answer.
+2. **`contracts.py` must stay importable on the node.** F is the reason ARCH will
+   refuse a FastAPI import in `contracts.py`: one transport dependency there and the
+   sensor stops booting with an `ImportError` pointing at a file nobody suspects,
+   while the shore station keeps working.
 
 ### ARCH — Amol only
 
@@ -106,7 +163,13 @@ ARCH: contracts.py + LIBRARIES.md + tests/fixtures.py   <-- DONE. Gate is open.
         +--> B (EO)       START NOW. Weights present, 45 FPS measured.
         +--> C (Fusion)   START NOW on fixtures. Real data later.
         +--> D (Decision) START NOW on fixtures. Never blocked.
+        +--> E (Console)  START NOW. ConsoleState + StreamEvent are in contracts.py;
+        |                 render fixtures first, connect the live stream after.
+        +--> F (Edge)     START NOW. Emits EoContact only — needs nothing from A, C or D.
 ```
+
+**E and F are not blocked on each other either.** F emits `EoContact`; E renders
+`ConsoleState`. Each can be built against `tests/fixtures.py` and meet at `app.py`.
 
 **No lane is blocked.** C and D develop against `tests/fixtures.py`, which emits
 contract-shaped synthetic tracks and contacts. **If lane C is ever idle waiting for
@@ -134,7 +197,7 @@ format is the cheapest thing to fix at 20:00 and the most expensive at 04:00.
 
 1. Append a block to `99_scratch/requests.md`: `### <UTC ts> | <lane> -> <owning
    lane> | <file>` then `WANT: / WHY: / IMPACT: / STATUS: OPEN`. Lane letters are
-   `A B C D ARCH`.
+   `A B C D E F ARCH`.
 2. `WHY:` states cause and effect (what breaks without it), never preference.
    `IMPACT:` names every module that changes. Only the **owning** lane edits `STATUS:`.
 3. A `contracts.py` request is an **interrupt, not a queue item** — say it out loud to
@@ -185,6 +248,8 @@ format is the cheapest thing to fix at 20:00 and the most expensive at 04:00.
 | B — EO + Geometry | | | ☐ |
 | C — Fusion + Verdict | | | ☐ |
 | D — Evidence + Demo *(second body here first)* | | | ☐ |
+| E — Console *(D+E on one person if the team is small)* | | | ☐ |
+| F — Edge node *(only if the Pi is on site — otherwise fold into B)* | | | ☐ |
 | ARCH | Amol Vivek Kulkarni | — | ☑ |
 
 **Rules that survive a 3 a.m. merge:** only write files your lane owns · never pass a

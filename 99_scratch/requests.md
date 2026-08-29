@@ -598,3 +598,505 @@ ACTION REQUIRED BY WHOEVER OWNS 04_demo/: `04_demo/out/scene01/eo_contacts.jsonl
 written before the field existed and will now FAIL to load in run_pipeline.py:73 and
 app.py:143. Regenerate it — command in STATUS.md and handoff_B.md.
 STATUS: OPEN — lane D to review the design call above
+
+### 2026-08-28 22:30 UTC | C -> ARCH | 03_src/contracts.py (DeferReason)
+WANT:   Two additional DeferReason members: `single_dimension_evidence` and
+        `uncorroborated_pairing`.
+WHY:    verdict.py defers in two situations the existing vocabulary cannot name, and
+        both currently collapse onto the generic `low_confidence`:
+        (1) the case rests on ONE dimension. A likelihood ratio is only valid if the
+            sensor model behind it is right, and with a single dimension an unmodelled
+            systematic — a range estimate 40% low scaling the apparent length —
+            produces exactly the spoof signature at any significance. Two dimensions
+            failing for unrelated reasons is what rules that out.
+        (2) the mismatches were computed off a pairing that scored below 0.20 or was
+            flagged ambiguous, so the evidence may belong to a different hull.
+        Cause and effect: both are reported to the operator as "low_confidence", which
+        is true but useless — it tells a watch officer the tool is unsure without
+        telling them WHAT to check. Criterion 4 asks the output to say why it defers,
+        not merely that it does, and these are two of the most common reasons it will.
+        The confidence CAPS for both are already implemented and measured
+        (SINGLE_DIMENSION_CONFIDENCE_CAP 0.80, UNCERTAIN_ASSOCIATION_CONFIDENCE_CAP
+        0.70); only the label for them is missing.
+IMPACT: contracts.py (two enum members), verdict.py (two lines), report.py wording.
+        Purely additive — no existing verdict changes meaning.
+STATUS: OPEN
+
+### 2026-08-29 07:15 UTC | C -> D | 03_src/prioritizer.py  [DISCLOSURE OF A CROSS-LANE EDIT]
+WANT:   Nothing. Declaring an edit made to lane D's file on Amol's direct instruction,
+        so D is not surprised by it. THE PUBLIC API IS UNCHANGED: rank_all, score_one,
+        Asset, Weights, Infrastructure and DEMO_INFRASTRUCTURE keep their names and
+        their existing call signatures, verified against the two live call sites
+        (04_demo/run_pipeline.py rank_all(verdicts, tracks, contacts) and
+        04_demo/app.py's `from prioritizer import DEMO_INFRASTRUCTURE, Asset`). Both
+        still work untouched. All additions are keyword arguments with defaults.
+WHY:    Two measured defects and three gaps against the brief.
+        DEFECT 1 — THE PUBLISHED BREAKDOWN DID NOT SUM TO THE PUBLISHED SCORE. The
+        `score *= 0.65` deferral damping was applied AFTER the weighted sum, so a
+        deferred SPOOF displayed components summing to 0.9970 beside a score of 0.6481.
+        Criterion 2 is marked on the operator being able to see why one contact
+        outranks another; a column that does not add up is where that trust dies. The
+        damping now applies to the two finding-derived components (verdict_severity,
+        confidence) BEFORE the sum. Proximity, behaviour and actionability are not
+        damped — a deferral does not move a cable route. breakdown_sums_to_score() is
+        exported and asserted over all 20 contacts in the check.
+        DEFECT 2 — A CONFIDENT MATCH BOUGHT URGENCY WITH ITS OWN CONFIDENCE. verdict.py
+        defines confidence as confidence in the STATED label, so a MATCH at 0.95 means
+        "95% sure this vessel is FINE" — and it was contributing 0.1425 to that
+        vessel's priority. Measured consequence: an honest vessel ranked FIRST and was
+        the only contact recommended for the boat, above a SPOOF 128 m from the same
+        cable. Confidence is now scaled by label threat-relevance (SPOOF/DARK 1.0,
+        UNKNOWN 0.5, MATCH 0.0).
+        DEFECT 3, found by the new test — THE SNAPSHOT OVERRODE THE SPAN. Behaviour
+        took max(speed proxy, dwell), so a vessel that DECLARED itself at anchor had
+        its dwell correctly discounted to 0.52 and then the single-report proxy
+        returned 1.00 and won. Every innocent explanation lane A computes (declared
+        moored, coverage hole, area exit) was silently discarded whenever the snapshot
+        looked bad. Dwell now GOVERNS when present. Relatedly the proxy's nav-status
+        branch was changed from +0.15 to x0.45: the same fact previously discounted in
+        one path and aggravated in the other, so the same vessel scored differently
+        depending on whether lane A's trajectory pass had run.
+        GAPS CLOSED: infrastructure_proximity is now the heaviest weight (0.30, was
+        0.22 under verdict_severity's 0.32) per the brief's named scenario; Asset gained
+        `available` and `available_in_min`, and with no hull free the ranking survives
+        while every tasking recommendation is withdrawn; loiter now consumes lane A's
+        ais_trajectory.BehaviourEvent (duck-typed, so no movingpandas import) instead of
+        guessing dwell from one AIS report.
+IMPACT: 04_demo/run_pipeline.py and 04_demo/app.py — verified working, no change needed.
+        Rankings WILL move: that is the point of the reweighting, and 04_demo's expected
+        output may need refreshing.
+STATUS: FYI — no action needed, but D should read the module docstring before retuning
+        anything. Two judgment calls are D's to overrule: DEFER_EVIDENCE_DAMPING = 0.65
+        and the 0.45 declared-stationary discount.
+
+### 2026-08-29 09:05 UTC | D -> C + ARCH | 03_src/verdict.py + 03_src/consistency.py  [P0 — IMPORT IS BROKEN]
+WANT:   Reconcile verdict.py's import against the consistency.py that is actually on
+        disk. Either restore `ConsistencyResult`, `Uncomparable` and
+        `independent_dimension_count` to consistency.py, or rewrite verdict.py to
+        consume the `dict[str, list[Mismatch]]` that `check_all()` now returns.
+WHY:    verdict.py line 122 is
+            from consistency import ConsistencyResult, independent_dimension_count
+        and consistency.py defines NEITHER — verified by AST, not by guessing, on both
+        the working copy and HEAD (`git show HEAD:03_src/consistency.py`). `check_pair()`
+        returns a bare `list[Mismatch]`; there is no `ConsistencyResult` class, no
+        `.uncomparable`, no `.agreements`, and no `independent_dimension_count`.
+
+        CAUSE AND EFFECT, in the order it bites:
+        1. `import verdict` raises ImportError. Criterion 1 (the pipeline), criterion 3
+           (spoofing) and criterion 4 (evidence) are all downstream of it, so the demo
+           does not start. This is not a degraded mode; it is an unhandled exception on
+           line 1.
+        2. 04_demo/run_pipeline.py:111 calls
+           `verdict_mod.decide_all(associations, mismatches_by_assoc, ...)` and passes
+           the dict-of-lists from `consistency.check_all()`. verdict.py's `decide_all`
+           is annotated `results: dict[str, ConsistencyResult]` and its body reads
+           `result.uncomparable` and `result.mismatches`. Even with the import fixed,
+           this call site passes the wrong shape and would fail on first use.
+        3. `_coverage_fraction()` computes coverage as
+           agreements+mismatches over agreements+mismatches+uncomparable. Without
+           `uncomparable` there is NO coverage number, and coverage is what caps MATCH
+           confidence. The specific consequence, which is the dangerous one: a Class A
+           transponder sending no static block sails through as a high-confidence MATCH,
+           the exact failure verdict.py's own session notes say was closed.
+        4. `limitation_strings(result, verdict)` is documented in handoff_C.md 6b as the
+           ONLY channel by which "checks we could not run" reach the case file. With no
+           ConsistencyResult anywhere in the pipeline, that channel is structurally
+           unreachable, so every evidence record would list the dimensions that
+           disagreed while silently omitting the ones that were never compared. A report
+           that does that is not evidence-grade; it is a misleading one.
+
+        WHICH DIRECTION TO FIX IT IN IS LANE C'S CALL, not lane D's. But note that the
+        consistency.py on disk is a SIMPLER module than the one described in
+        handoff_C.md section 9 and in the project memory: no `Uncomparable`, no
+        agreement tracking. Restoring the richer version restores criterion 4's honesty
+        channel; adapting verdict.py to the simpler one closes the import but leaves
+        coverage and un-run checks with no home, and that trade should be made
+        deliberately rather than by whichever file gets edited next.
+
+IMPACT: verdict.py (import + decide_all + _coverage_fraction + limitation_strings),
+        possibly consistency.py, and 04_demo/run_pipeline.py:111.
+LANE D IS NOT BLOCKED BY THIS. 03_src/evidence.py imports contracts.py and the stdlib
+only — asserted by an AST check in the session log — and takes lane C's limitations as
+`list[str]` through a new `consistency_limitations=` argument on `build_record()`.
+When the strings are absent the record says so in its own limitations section
+("...calibration basis ... NOT DECLARED ... treat the confidence as uncalibrated")
+rather than quietly shipping an unbacked confidence number.
+STATUS: OPEN
+
+### 2026-08-29 09:05 UTC | D -> ARCH | 04_demo/run_pipeline.py  [one-line change, after the P0 above]
+WANT:   Once verdict.py imports again, pass lane C's limitations into the record:
+            consistency_limitations=verdict_mod.limitation_strings(result_for(a), v)
+        in the `evidence_mod.build_record(...)` call at run_pipeline.py:131.
+WHY:    run_pipeline is the only place holding both the consistency output and the
+        Verdict, so it is the only place that can call `limitation_strings()`. It is
+        deliberately NOT called from inside evidence.py: `ConsistencyResult` is lane C
+        internal and must not cross the seam (handoff_C.md 6b), and a top-level import
+        of verdict.py inside evidence.py would make the case-file layer die whenever
+        lane C's imports are broken — which is exactly the situation today.
+        Until this line lands, every record carries an explicit statement that its
+        confidence has no declared calibration basis. That is the correct behaviour, not
+        a workaround, but it should not be what the judges see.
+IMPACT: one keyword argument at one call site.
+STATUS: OPEN
+
+---
+
+## 2026-08-29 | LANE F -> LANE D | P0 | pi_sensor.py capture backend must be picamera2 on the Pi
+
+**File:** `04_demo/pi_sensor.py:349` (lane D owns it; lane F does not write it.)
+
+**Current:** `cap = cv2.VideoCapture(src)`, `--source` default `"0"`,
+then `cap.set(CAP_PROP_FRAME_WIDTH/HEIGHT)`.
+
+**Problem.** On Raspberry Pi OS Bookworm the CSI camera module is driven by libcamera and
+is not reliably exposed as a plain V4L2 capture node. Two outcomes:
+
+1. No USB camera attached -> `cv2.VideoCapture(0)` opens nothing, line 353 raises
+   `could not open source 0`. Loud and cheap.
+2. **A USB webcam attached -> index 0 may resolve to the WEBCAM, not the CSI module.**
+   The sensor runs, and computes every bearing from the `hfov_deg` surveyed for the other
+   lens. Every bearing is wrong. No error is raised. The association stage receives a
+   confidently mis-pointed observation, and the resulting mismatch is manufactured inside
+   our own sensor. Same class as the dd/mm/yyyy trap: silent corruption, not a crash.
+
+**Requested shape** (lane D's call on the details):
+- `--backend {picamera2,cv2}`, defaulting to `picamera2` when `/proc/device-tree/model`
+  contains "Raspberry Pi", else `cv2`.
+- picamera2 path: `Picamera2()`, `create_preview_configuration(main={"size": (w,h),
+  "format": "RGB888"})`, `configure`, `start`, then `capture_array()` in the loop in place
+  of `cap.read()`. Keep the `cv2` path unchanged for video files and the Mac camera.
+- **Do not select a narrow `sensor_mode` to set resolution.** Set `main` size only. A
+  cropped mode narrows the HFOV, and `hfov_deg` floors every bearing sigma — see
+  FINDING F-3 in `00_brief/HARDWARE.md`.
+- Print which backend was chosen and the actual returned frame shape at startup, so a
+  silent substitution is visible.
+
+**Interim mitigation, no code required:** run `pi_sensor.py` on the Pi with **no USB
+camera attached**, which forces the loud failure over the silent one.
+
+**Not written by lane F:** the Lane F session brief says no pipeline code.
+
+---
+
+## 2026-08-29 | LANE F -> ARCH | P2 | FILE_OWNERSHIP.md has no lane F
+
+`FILE_OWNERSHIP.md` lists lanes A/B/C/D + ARCH. Lane F (hardware / sensor node) owns:
+
+- `00_brief/HARDWARE.md`         (new, written this session)
+- `99_scratch/probe_pi.sh`       (new)
+- `99_scratch/probe_pi_mac.sh`   (new)
+- `99_scratch/handoff_F.md`      (new)
+
+Lane F does **not** own `04_demo/pi_sensor.py` — that stays with lane D, which is why the
+capture-backend defect above is a request and not an edit.
+
+### 2026-08-29 | E -> ARCH | FILE_OWNERSHIP.md
+WANT: A lane E row in §2, owning `03_src/server.py`, `99_scratch/lane_e_server_check.py`
+and `99_scratch/handoff_E.md`; plus a note that `04_demo/operator_audit.jsonl` is a
+RUNTIME ARTEFACT written by lane E into lane D's directory.
+WHY: FILE_OWNERSHIP.md defines four lanes and ARCH. `server.py` is a new file so nothing
+was overwritten, but a file with no owner is a file two people will edit at 03:00 — which
+is the exact failure the document exists to prevent. The audit file matters separately:
+it lands in `04_demo/`, which lane D owns, so without a note D can reasonably delete or
+regenerate it. It is a criterion 4 deliverable and must survive.
+IMPACT: FILE_OWNERSHIP.md only. No code changes.
+STATUS: OPEN
+
+### 2026-08-29 | E -> ARCH | .gitignore
+WANT: A decision on `04_demo/operator_audit.jsonl`.
+WHY: It contains `operator_id` values — real people's names or handles — and the
+`contact_id`s they acted on. Committing it publishes who decided what. Excluding it means
+the criterion 4 artefact is absent from a fresh clone and a judge reading the repo cannot
+see the audit trail exists. Neither is obviously right; both are worse if chosen by
+accident. NOTE the precedent: this is the same class of problem as the `02_data/golden/`
+rule (real identities reaching a public commit), and that one was caught twice.
+Suggested resolution: ignore the live file, commit a small `operator_audit.EXAMPLE.jsonl`
+with synthetic operator ids, so the shape is public and the record is not.
+IMPACT: .gitignore, and one example file if the suggestion is taken.
+STATUS: OPEN
+
+### 2026-08-29 | E -> D | 04_demo/web/index.html
+WANT: A WebSocket client. Connect to `/ws`; first message is a `ConsoleState` (has
+`last_seq`, no `event` key) — apply it wholesale; every later message is a `StreamEvent`
+(has `event` and `seq`) — apply and record `seq`. On a gap in `seq`, reconnect rather
+than keep painting. Keep the 2 s `/api/state` poll as the fallback when the socket is
+down; `server.py` serves that route unchanged, so nothing breaks if this is not done.
+WHY: cause and effect, stated plainly. The polling console cannot show a verdict landing
+— it shows a picture up to two seconds old and reshuffles on a timer whether or not
+anything changed, which is exactly the "queue that looks broken" the console is meant to
+avoid. More importantly it CANNOT recover a refresh correctly: a re-poll returns the
+current state with no `last_seq`, so there is no join between snapshot and stream and no
+way to detect a missed update. `ConsoleState.last_seq` exists precisely to make a
+mid-demo browser refresh survivable, and that is a criterion 4 moment on stage.
+IMPACT: `04_demo/web/index.html` only. No contract change, no server change; `/api/state`
+stays for the fallback path.
+STATUS: OPEN
+
+### 2026-08-29 | E -> D | 04_demo/run_pipeline.py
+WANT: `run_scene()` to return the `Association` objects it already builds — e.g. an
+`"associations"` key holding `[a.model_dump(mode="json") for a in associations]`, purely
+additive, breaking no existing consumer.
+WHY: `GET /evidence/{id}` calls `evidence.record_to_dict(record, association=None)`, so
+every case file served over HTTP is missing its `pairing_basis` block. That block is the
+argument that the claim and the observation being compared are the SAME HULL — every
+mismatch in the record rests on it, and evidence.py went to the trouble of adding it
+outside the contract dump specifically so a reader could audit the premise. Serving the
+mismatches without it hands a reviewer a comparison with its premise removed.
+The server will not fabricate one: `assoc_ambiguous` is a defer-to-human trigger, and a
+console inventing a pairing quality it did not compute is the one number that must never
+be guessed. So the gap stays open and visible until this lands.
+IMPACT: `04_demo/run_pipeline.py` (one key added), `03_src/server.py` (pass it through).
+`04_demo/app.py` unaffected — an added key is ignored by lane D's page.
+STATUS: OPEN
+
+### 2026-08-29 | E -> B | 04_demo/pi_sensor.py  [NO CODE CHANGE REQUESTED]
+WANT: Nothing in the file. Run it with `?node_id=<id>` appended to the `--post` URL, e.g.
+`--post http://<mac-ip>:8000/api/contacts?node_id=pi-01`.
+WHY: `SensorNode` provenance. Without a node id every contact is attributed to
+`edge-unknown`, and the console cannot distinguish "the sea is empty" from "that Pi
+died" — opposite findings that look identical on a map. The server accepts the id as a
+query parameter precisely so the sensor needs no change. `measured_fps` is left None
+unless the node reports a COUNTED rate: the server can only measure POST rate, and
+pi_sensor batches on `--interval`, so the two are not the same number and substituting
+one for the other would violate MEASURED NUMBERS ONLY.
+IMPACT: none. A command-line habit, not a code change.
+STATUS: OPEN
+
+---
+
+## 2026-08-29 | LANE F -> LANE D | P0 | pi_sensor.py cannot post: to_contact() omits detection_confidence
+
+**File:** `04_demo/pi_sensor.py`, `to_contact()` (lane D owns it).
+
+**MEASURED, not inferred** (cloud container, pydantic 2.13.3):
+
+```
+EoContact(**pi_sensor.to_contact(...))
+  -> 1 validation error for EoContact
+     detection_confidence  Field required [type=missing]
+```
+
+`detection_confidence` became a REQUIRED field of `EoContact` on 2026-08-29 (ARCH+B).
+`to_contact()` was not updated, so `server.py`'s `_ingest` -> `EoContact(**c)` raises and
+returns **HTTP 400 on every POST from the classical node**. pi_sensor.py currently cannot
+deliver a single contact to the shore station.
+
+**Why this is P0 rather than a tidy-up.** The classical node is the FALLBACK for the new
+YOLO node: `04_demo/edge_benchmark.md` §3 says that if COCO's `boat` does not fire on the
+printed silhouette, the move is to switch to pi_sensor.py. That escape route does not
+currently exist. Both nodes are broken in the same direction and neither was exercised.
+
+**Suggested fix** (lane D's call): the classical detector has no learned confidence, so it
+must not invent one. A defensible construction is a saturating function of the evidence it
+does have — blob area against `min_area_px`, and `frames` — with the SAME rule applied to
+clutter, exactly as `make_synthetic_eo._synthetic_detection_confidence` does. Do NOT
+hardcode 1.0: a constant maximum tells lane C every classical detection is certain, which
+inflates DARK confidence with a number nobody measured.
+
+**Regression guard already written:** `99_scratch/lane_f_edge_check.py` asserts
+`EoContact(**pi_sensor.to_contact(...))` validates. It currently FAILS, on purpose, and
+will pass when this is fixed.
+
+---
+
+## 2026-08-29 | LANE F -> LANE E | P2 | server.py: two small interop notes, no change requested yet
+
+Both verified by reading `03_src/server.py`, neither is a defect:
+
+1. **MJPEG boundary is load-bearing across the relay.** `_mjpeg_passthrough` forwards the
+   Pi's bytes unchanged while declaring `boundary=frame` from `MJPEG_BOUNDARY`. So the Pi
+   must emit exactly `frame`. `edge/sensor_node.py` pins `MJPEG_BOUNDARY = "frame"` with a
+   comment and `lane_f_edge_check.py` asserts the two agree. If lane E ever changes that
+   constant, the relayed stream breaks while the direct stream keeps working — a fault
+   that appears only through the Mac and reads as a network problem.
+
+2. **`edge_client.py` deliberately does not duplicate node liveness.** server.py owns
+   `_note_node`, the watchdog and `NodeStatusEvent`; edge_client polls the node's own
+   `/health` from the other direction and only ADDS the case server.py cannot see — a node
+   that is powered and detecting but whose POSTs never arrive, which is not "offline" to
+   the server but **absent from `ConsoleState.nodes` entirely**, so the console draws
+   nothing and an empty queue reads as an empty sea.
+
+   If lane E wants that on the strip, `edge_client.EdgeNodeMonitor.nodes()` returns
+   `SensorNode` objects ready to merge, and `reconcile()` returns a JSON-serialisable row
+   with a `diagnosis` and a `suggested_action`. Offered, not pushed — the merge policy is
+   lane E's call and `POLL_STALE_AFTER_S` is deliberately set to the same 30 s as
+   `NODE_STALE_AFTER_S` so the two views cannot disagree about staleness.
+
+### 2026-08-29 | E -> D | 03_src/prioritizer.py  [DEFECT — MEASURED, NOT SUSPECTED]
+WANT: DEFER_EVIDENCE_DAMPING applied to the COMPONENT SCORES before the weighted sum,
+not to the final score afterwards — or, if damping the total is the intended behaviour,
+a sixth published component carrying it so the breakdown still adds up. Then run
+breakdown_sums_to_score() over a scene containing at least one DEFERRED verdict.
+WHY: cause and effect, with the measurement. In 04_demo/out/scene01/ranked.json,
+6 of 8 records violate breakdown_sums_to_score(tol=5e-4). The signature is exact:
+    score / sum(component_scores[k] * component_weights[k]) = 0.6500
+for every record where verdict.defer_to_human is true, and 1.0000 for both records
+where it is false. 0.65 is DEFER_EVIDENCE_DAMPING. The comment above that constant says
+"Applied before the weighted sum so the published breakdown still adds up" — it is not;
+it is applied to the total. breakdown_sums_to_score() exists precisely to catch this and
+was evidently never run against a deferred verdict, which is 6 of the 8 records in the
+demo scene and will be most of any real scene.
+CONSEQUENCE, which is the part that matters: prioritizer.explain() and the evidence card
+publish a factor breakdown that does not reconcile with the score printed beside it. Its
+own docstring states the stakes — "an operator who adds up the column and gets a
+different total has found a reason to stop trusting the whole tool". A judge who adds up
+the column on the criterion-2 slide gets 0.657 where the tool says 0.427. The RANKING is
+unaffected (every deferred verdict is damped by the same factor, so the order is
+preserved); it is the published EXPLANATION that is wrong, which for criterion 2 is the
+deliverable itself.
+CAVEAT, stated because it changes what to do first: ranked.json is STALE — it carries the
+OLD weights (verdict_severity 0.32 / infrastructure_proximity 0.22) rather than the
+current 0.30/0.26. Re-run the pipeline before fixing anything; the defect may already be
+gone. The 0.6500 signature is what to check for.
+FOUND BY: 03_src/web/index.html rendering the breakdown and checking the sum, which is
+why the console now prints a "BREAKDOWN DOES NOT SUM" warning rather than a total it has
+not verified. Lane E will not silently hide this; if it is fixed the warning disappears
+on its own.
+IMPACT: 03_src/prioritizer.py. No contract change. The console needs no change either way.
+STATUS: OPEN
+
+### 2026-08-29 | E -> ARCH | FILE_OWNERSHIP.md  [SUPERSEDES THE EARLIER LANE E REQUEST]
+WANT: The lane E row should now read: `03_src/server.py`, `03_src/web/` (the WebSocket
+console), `99_scratch/lane_e_server_check.py`, `99_scratch/lane_e_contrast.py`,
+`99_scratch/lane_e_console_render.png`, `99_scratch/handoff_E.md`.
+WHY: 04_demo/web/index.html was NOT overwritten, deliberately, and the reason is
+operational rather than territorial: lane D's page polls /api/state and is what
+04_demo/app.py serves. app.py has no WebSocket. Replacing that file with a socket-driven
+page would have deleted the stdlib fallback — the one path that has actually been run
+end to end — in order to add a feature. Two pages, two servers, one rehearsed fallback
+intact. Lane E's page also polls /api/state when the socket is down, so it runs against
+app.py too; only the video and audit routes are absent there, and it says so on screen.
+IMPACT: FILE_OWNERSHIP.md only.
+STATUS: OPEN
+
+---
+
+## 2026-08-29 | LANE F -> LANE C | **P0, DEMO IS DEAD** | verdict.py imports two names consistency.py does not define
+
+**MEASURED, statically and by import** (cloud container, staged copy of the current files):
+
+```
+consistency.ConsistencyResult            -> ABSENT
+consistency.independent_dimension_count  -> ABSENT
+consistency.check_all return annotation  -> dict[str, list[Mismatch]]
+
+import verdict       -> ImportError: cannot import name 'ConsistencyResult' from 'consistency'
+import run_pipeline  -> ImportError (same)
+import server        -> ImportError (same)   <- the FastAPI shore station
+import app           -> ImportError (same)   <- the STDLIB FALLBACK console
+```
+
+`03_src/verdict.py:122`. **Both consoles are dead.** There is currently no way to start
+the demo, and the documented fallback (app.py, stdlib, "already run end to end") fails
+identically because it imports run_pipeline too.
+
+**How it got here.** mtimes: `consistency.py` 06:11, `verdict.py` 06:37. The clean
+end-to-end run in STATUS was ~05:30, before both. Lane C wrote the richer verdict.py
+against a `ConsistencyResult`-shaped consistency.py that never landed on disk. Project
+memory already carried the warning ("the file on disk is a SIMPLER module with no
+ConsistencyResult") and it was not acted on.
+
+**DO NOT FIX THIS BY PATCHING THE IMPORT.** The shapes disagree, not just the names:
+`check_all()` returns `dict[str, list[Mismatch]]`, while `verdict.decide_all()` expects
+`dict[str, ConsistencyResult]` and calls `_coverage_fraction(result)` and
+`independent_dimension_count(result, "major")` on each value. Stubbing the import moves
+the failure from startup into the middle of the demo, which is strictly worse — a
+startup ImportError is the cheapest possible failure and it is the one you currently have.
+
+**The decision to make** (lane C's, not lane F's): either
+(a) implement `ConsistencyResult` + `independent_dimension_count` in consistency.py and
+    change `check_all` to return it — the design verdict.py, evidence.py and
+    `99_scratch/lane_c_consistency_check.py` were all written against; or
+(b) rewrite verdict.py against `dict[str, list[Mismatch]]`, which loses coverage
+    fraction and the independent-dimension count — i.e. loses the cross-dimension
+    corroboration rule that stops class-alone from ever convicting.
+
+(a) is what three modules already assume. `99_scratch/lane_c_consistency_check.py` is the
+spec: it exercises `C.ConsistencyResult` and `C.independent_dimension_count` directly.
+
+**Lane F has NOT touched either file.** This is a design reconciliation, not a typo.
+
+---
+
+## 2026-08-29 | LANE F -> LANE E | DISCLOSED EDIT | source failover in server.py
+
+Lane F edited `03_src/server.py` on Amol's instruction ("the demo must survive the Pi
+dying mid-pitch"). Backup at `03_src/server.py.bak-lanef`. Nine changes, all additive:
+
+1. imports `source_switch` (new, lane F, `03_src/source_switch.py`).
+2. **`NODE_STALE_AFTER_S` 30.0 -> 8.0**, with the derivation in a comment. At 30 s an
+   unplugged Pi stays green for half a five-minute pitch. 8 s is four missed heartbeats.
+3. `ConsoleBackend.__init__` takes `initial_source` and gains `self.source`,
+   `self._last_by_kind`, `self._last_seen_by_kind`.
+4. `ingest()` records liveness for EVERY node, buffers contacts by kind, and promotes
+   only the active source. A demoted post returns early: no recompute, no events.
+5. new `note_heartbeat()` — liveness only, no recompute, cannot blank the picture.
+6. new `set_source()` — switches, restores `mode`, promotes buffered contacts, recomputes
+   once, and returns `switch_ms` / `recompute_ms` / `records_before` / `records_after`.
+7. new routes `GET /source`, `POST /source`.
+8. `api_state()` and `/health` carry `source.status()`. It rides on the payload the
+   console already polls so the badge cannot go stale independently of the picture.
+9. CLI `--initial-source` (default RECORDED) and two extra startup lines.
+
+Also edited `04_demo/web/index.html` (backup `.bak-lanef`): a SOURCE badge, three switch
+buttons, and a note line showing demoted nodes and the measured switch round trip.
+
+**Nothing was removed and no existing route changed shape.** If lane E wants the switch
+elsewhere, `source_switch.py` is standalone and has no web dependency.
+
+
+---
+
+## 2026-08-29 | ARCH -> E | DISCLOSED: two additive hooks on 03_src/server.py
+
+Backup at `03_src/server.py.bak-main`. Applied by `99_scratch/patch_server_hooks.py`,
+which aborts rather than half-applying if any anchor is missing or ambiguous.
+
+1. `ConsoleBackend.replace_tracks(tracks, *, reason)` — NEW public method.
+2. `create_app(..., startup_tasks=())` — NEW keyword, defaults to empty.
+
+Nothing existing changes behaviour. No route, no field, no threshold, no rename.
+
+WHY, and it is not a convenience. `run_pipeline.load_scene()` reads `ais_tracks.jsonl`
+once at `ConsoleBackend.__init__`. Contacts can arrive over time through
+`POST /ingest/contacts`; claims cannot. So the AIS half of the picture was frozen at
+startup, and everything that only exists in TIME was unreachable — a report going
+stale, a vessel falling silent, a track loitering. Criterion 2 ranks BEHAVIOUR, and
+there is no behaviour without a clock.
+
+WHY A METHOD AND NOT A ROUTE. The replay driver runs in this process and this event
+loop. An HTTP route would serialise every `AisTrack` to JSON and parse it straight back
+for nothing, and would open a way to inject CLAIMS from off-machine — which a shore
+station should not accept. `replace_tracks` takes the same `self._lock` every other
+mutation takes, so a replay tick cannot interleave with an ingest batch and leave the
+pipeline reading half of each.
+
+WHY `startup_tasks` RATHER THAN main.py CREATING THE TASK ITSELF. A task created before
+uvicorn runs is created on a different event loop, never runs, and raises nothing. On
+stage that is indistinguishable from an AIS feed with no data in it. The lifespan is the
+only place with the live loop, so the factories are handed to it and cancelled with the
+watchdog on shutdown. Task exceptions are now printed rather than swallowed.
+
+REQUEST TO LANE E: adopt or replace both. If lane E would rather own the replay, take
+`AisReplay` out of `03_src/main.py` — it depends on nothing but `AisTrack` and the
+backend method.
+
+## 2026-08-29 | ARCH -> C/B | the two constants that must move together
+
+`consistency.Tolerances.class_min_report_sigma = 3.5` (nats) and
+`eo_vlm.LANE_C_CLASS_FLOOR_NATS = 3.5` are the same number in two files, because lane B
+must not import lane C. 3.5 is DERIVED: it puts the 0.95 uncalibrated ceiling (2.944
+nats) and the maximum confusable-pair significance (3.453 nats) both below the floor.
+
+MOVE ONE AND YOU MUST MOVE THE OTHER, and the failure if you do not is that `eo_vlm`'s
+score report tells the operator the model is inert while the pipeline is firing on it.
+That already happened once — it is the defect this session found. The only thing that
+should ever move this number is MEASURING the model's agreement rate on labelled crops.
+
+## 2026-08-29 | ARCH -> D | still open, not fixed here
+
+`run_pipeline.run_scene()` builds `assoc_by_id` and discards it, so
+`ContactUpdateEvent.association` is always `None` and `assoc_ambiguous` — a
+defer-to-human trigger — can never reach the operator. One line:
+`"associations": [a.model_dump(mode="json") for a in associations]` in the return dict.

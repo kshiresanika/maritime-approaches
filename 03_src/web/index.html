@@ -1,0 +1,1670 @@
+<!doctype html>
+<html lang="en" data-console="maritime-approaches">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Maritime Approaches — Watch Console</title>
+
+<!--
+  index.html — the operator console. Lane E.
+
+  ONE FILE, VANILLA JS, NO BUILD STEP. Leaflet is the only external dependency and it
+  is loaded from a LOCAL copy first (/assets/leaflet.js) with the CDN as fallback —
+  see loadLeaflet(). One curl on a good link makes the demo immune to venue wifi, and
+  nothing breaks if that curl never happens.
+
+  NO BASEMAP TILES BY DEFAULT. Tiles need live internet on every pan and zoom, and a
+  half-loaded tile grid on a projector reads as a broken tool. The map draws real
+  geometry on a graticule instead, which is deterministic, rehearsable and identical
+  every run. Add ?tiles=1 to opt in if the venue link is good.
+
+  WHERE THE DATA COMES FROM, AND WHY IT IS TWO SOURCES:
+    WS /ws        The change signal. First message is a full ConsoleState (records,
+                  nodes, unresolved contacts, recent actions, last_seq); every later
+                  message is a StreamEvent. This is what makes the queue re-rank in
+                  front of the judge at the moment a verdict lands, rather than up to
+                  two seconds later.
+    GET /api/state  The stage: camera pose, infrastructure, the patrol asset, the
+                  scene caveat and the scoring block. ConsoleState deliberately does
+                  not carry those — they are properties of the scene, not of the
+                  picture — so they are fetched once at load.
+  If the socket will not open or drops, the page falls back to polling /api/state
+  every 2 s and says so in the header. It therefore also runs unchanged against
+  04_demo/app.py, which has no WebSocket at all.
+
+  EVERY IDENTITY ON THIS SCREEN IS PSEUDONYMISED BY THE SERVER, and this page refuses
+  to render one that is not — see renderIdent(). Defence in depth: the rule is
+  non-negotiable and a console is the most public surface in the project.
+
+  COLOURS ARE MEASURED, NOT CHOSEN BY EYE. Every value in :root below was run through
+  99_scratch/lane_e_contrast.py against all three backgrounds it can appear on. Gate:
+  7:1 for text (WCAG AAA), 3:1 for meaningful non-text. 14/14 pass. Two were changed
+  because they failed: the SPOOF red passed on the panel at 7.26:1 and FAILED on a
+  SELECTED row at 6.50:1 — and a SPOOF row is exactly the row that gets selected.
+  Change a colour here and re-run that script.
+-->
+
+<style>
+:root{
+  /* ---- grounds ---- */
+  --bg:#080b10;            /* page */
+  --panel:#10151c;         /* pane */
+  --raised:#18202a;        /* selected row / evidence card */
+  --rule:#586b82;          /* 3.35:1 vs panel — a pane divider carries meaning */
+
+  /* ---- text (all >= 7.6:1 on the worst ground) ---- */
+  --fg:#f4f8fc;            /* 15.39 */
+  --fg2:#c8d6e4;           /* 11.10 */
+  --muted:#9fb3c8;         /*  7.63 — the floor. Nothing dimmer than this exists. */
+
+  /* ---- verdict semantics ---- */
+  --match:#b6c6d6;         /*  9.41 */
+  --dark:#ffb64d;          /*  9.42 */
+  --spoof:#ff9090;         /*  7.54 */
+  --unknown:#c9a6ff;       /*  8.12 */
+  --defer:#ffd166;         /* 11.39 */
+
+  /* ---- state ---- */
+  --ok:#6ee7a8;            /* 10.68 */
+  --off:#ff9aa2;           /*  8.13 */
+  --accent:#7fd4ff;        /*  9.98 */
+  --claimed:#9fc2ff;       /*  9.10 — the AIS side of the wall */
+  --observed:#ffd08a;      /* 11.45 — the camera side of the wall */
+
+  /* ---- type. Sized for a judge standing three metres back, not leaning in. ---- */
+  --f-micro: clamp(11px, 0.62vw, 14px);
+  --f-label: clamp(12px, 0.70vw, 15px);
+  --f-body:  clamp(14px, 0.85vw, 18px);
+  --f-lead:  clamp(17px, 1.05vw, 23px);
+  --f-big:   clamp(22px, 1.55vw, 34px);
+  --f-huge:  clamp(30px, 2.30vw, 50px);
+}
+
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  background:var(--bg); color:var(--fg);
+  font:var(--f-body)/1.4 ui-sans-serif,-apple-system,"SF Pro Text","Segoe UI",Roboto,sans-serif;
+  /* NOTHING BELOW THE FOLD DURING THE DEMO. The page itself never scrolls; panes
+     scroll internally. A judge must never be shown a scrollbar as the answer. */
+  overflow:hidden;
+}
+.mono{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}
+
+/* ================= layout: header + 2x2 ================= */
+#app{display:grid;grid-template-rows:auto minmax(0,1fr);height:100vh}
+
+header{
+  display:flex;align-items:center;gap:clamp(10px,1.2vw,24px);
+  padding:8px clamp(10px,1vw,18px);
+  border-bottom:2px solid var(--rule);background:var(--panel);
+}
+header h1{font-size:var(--f-lead);font-weight:800;letter-spacing:.055em;white-space:nowrap}
+header h1 .sub{color:var(--muted);font-weight:600;letter-spacing:.02em}
+.spacer{flex:1}
+
+.chip{
+  display:inline-flex;align-items:center;gap:7px;white-space:nowrap;
+  padding:4px 11px;border:2px solid var(--rule);border-radius:999px;
+  font-size:var(--f-label);font-weight:700;letter-spacing:.05em;text-transform:uppercase;
+}
+.chip b{font-weight:800}
+.dot{width:11px;height:11px;border-radius:50%;background:var(--muted);flex:none}
+.dot.on{background:var(--ok)} .dot.off{background:var(--off)}
+
+#opid{
+  background:var(--raised);color:var(--fg);border:2px solid var(--rule);border-radius:6px;
+  padding:4px 9px;font:700 var(--f-label)/1.2 inherit;width:14ch;
+}
+#opid:focus{outline:3px solid var(--accent);outline-offset:1px}
+
+#grid{
+  display:grid;gap:2px;background:var(--rule);
+  grid-template-columns:1fr 1fr;
+  /* `auto` first row so the disconnect banner takes only the height it needs and the
+     two pane rows keep their proportions. It collapses to zero when hidden. */
+  grid-template-rows:auto minmax(0,42fr) minmax(0,58fr);
+  min-height:0;
+}
+.pane{background:var(--panel);display:grid;grid-template-rows:auto minmax(0,1fr);min-height:0;min-width:0}
+.pane>h2{
+  display:flex;align-items:center;gap:10px;
+  font-size:var(--f-label);font-weight:800;letter-spacing:.13em;text-transform:uppercase;
+  color:var(--muted);padding:7px clamp(8px,.7vw,14px);border-bottom:1px solid var(--rule);
+}
+.pane>h2 .crit{color:var(--accent);font-weight:800}
+.body{min-height:0;overflow:auto;position:relative}
+.body::-webkit-scrollbar{width:12px;height:12px}
+.body::-webkit-scrollbar-thumb{background:var(--rule);border-radius:6px}
+
+/* ================= 1. live sensor ================= */
+#sensorWrap{position:relative;height:100%;display:grid;place-items:center;background:#05070a;overflow:hidden}
+#feed{max-width:100%;max-height:100%;display:block}
+#feed.hidden{display:none}
+#boxes{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+/* When there is no imagery the detection boxes still draw — they ARE the sensor's
+   output. The explanatory text therefore has to get out of their way: pinned to the
+   top of the pane rather than centred, because contacts cluster near the horizon,
+   which is vertically centred in the frame. Found by looking at a screenshot; the DOM
+   dump reported both elements present and correct, and they were — on top of each
+   other. */
+#noVideo{
+  position:absolute;left:0;right:0;top:0;z-index:4;
+  padding:clamp(42px,3.4vw,58px) clamp(12px,1.4vw,26px) clamp(10px,1vw,18px);text-align:center;
+  margin:0 auto;max-width:74ch;color:var(--fg2);font-size:var(--f-label);line-height:1.45;
+  background:linear-gradient(#05070aee,#05070ac0 70%,#05070a00);
+}
+#noVideo:empty{display:none}
+#frameEdge{
+  position:absolute;inset:6% 4%;border:1px dashed #2b3644;border-radius:3px;
+  pointer-events:none;z-index:1;
+}
+#frameEdge.hidden{display:none}
+#noVideo strong{display:block;color:var(--dark);font-size:var(--f-lead);letter-spacing:.06em;margin-bottom:8px}
+#sensorBadges{position:absolute;left:8px;top:8px;display:flex;gap:7px;flex-wrap:wrap;z-index:5}
+#sensorBadges .chip{background:rgba(8,11,16,.88);backdrop-filter:blur(3px)}
+#sensorFoot{
+  position:absolute;left:8px;right:8px;bottom:6px;z-index:5;
+  font-size:var(--f-micro);color:var(--muted);background:rgba(8,11,16,.88);
+  padding:4px 8px;border-radius:5px;
+}
+
+/* ================= 2. map ================= */
+#map{height:100%;width:100%;background:#070a0f}
+.leaflet-container{background:#070a0f!important;font-family:inherit}
+.leaflet-control-attribution{background:rgba(8,11,16,.9)!important;color:var(--muted)!important;font-size:11px!important}
+.leaflet-control-attribution a{color:var(--accent)!important}
+#mapBadges{position:absolute;right:8px;top:8px;z-index:600;display:flex;flex-direction:column;gap:6px;align-items:flex-end}
+#mapBadges .chip{background:rgba(8,11,16,.9)}
+#legend{
+  position:absolute;left:8px;bottom:8px;z-index:600;background:rgba(8,11,16,.92);
+  border:1px solid var(--rule);border-radius:6px;padding:7px 10px;font-size:var(--f-micro);
+  display:grid;gap:4px;
+}
+#legend i{width:16px;height:0;border-top:4px solid;display:inline-block;vertical-align:middle;margin-right:7px}
+#legend span{color:var(--fg2);white-space:nowrap}
+
+/* ================= 3. priority queue ================= */
+#queue{list-style:none;padding:4px}
+.row{
+  display:grid;grid-template-columns:auto 1fr auto;gap:0 clamp(8px,.8vw,16px);
+  align-items:center;padding:clamp(7px,.7vw,13px) clamp(8px,.8vw,14px);
+  border:2px solid transparent;border-bottom-color:var(--rule);
+  cursor:pointer;background:var(--panel);
+}
+.row:hover{background:var(--raised)}
+.row[aria-selected="true"]{background:var(--raised);border-color:var(--accent)}
+.row:focus-visible{outline:3px solid var(--accent);outline-offset:-3px}
+.rank{
+  font:800 var(--f-huge)/1 ui-monospace,Menlo,monospace;font-variant-numeric:tabular-nums;
+  color:var(--muted);min-width:2.1ch;text-align:right;
+}
+.row.top .rank{color:var(--accent)}
+.ident{grid-column:2;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.ident .mmsi{font:800 var(--f-lead)/1.1 ui-monospace,Menlo,monospace;letter-spacing:.02em}
+.ident .nm{color:var(--muted);font-size:var(--f-label);font-weight:700;letter-spacing:.05em}
+.why{grid-column:2;color:var(--fg2);font-size:var(--f-label);margin-top:3px;line-height:1.35}
+.why b{color:var(--fg);font-weight:800}
+.rightcol{grid-column:3;grid-row:1/4;display:flex;flex-direction:column;align-items:flex-end;gap:5px;min-width:clamp(120px,10vw,190px)}
+
+.badge{
+  padding:3px 10px;border-radius:5px;font:800 var(--f-label)/1.25 inherit;
+  letter-spacing:.1em;text-transform:uppercase;border:2px solid currentColor;white-space:nowrap;
+}
+.v-MATCH{color:var(--match)} .v-DARK{color:var(--dark)}
+.v-SPOOF{color:var(--spoof)} .v-UNKNOWN{color:var(--unknown)}
+.badge.solid{background:currentColor}
+.badge.solid span{color:#05070a;font-weight:900}
+.badge.defer{color:var(--defer);border-style:dashed}
+.badge.rec{color:var(--ok)}
+
+.conf{display:flex;align-items:center;gap:7px;width:100%;justify-content:flex-end}
+.conf .track{height:12px;flex:1;max-width:120px;background:#05070a;border:1px solid var(--rule);border-radius:2px;overflow:hidden}
+.conf .fill{height:100%;background:currentColor}
+.conf .num{font:800 var(--f-body)/1 ui-monospace,Menlo,monospace}
+
+@keyframes flash{0%{background:#2b3a4d}100%{background:var(--panel)}}
+.row.changed{animation:flash 1.5s ease-out}
+.row.moving{transition:transform .55s cubic-bezier(.22,1,.36,1)}
+
+#queueEmpty{padding:clamp(14px,1.4vw,28px);color:var(--muted);font-size:var(--f-body)}
+
+/* ================= 4. evidence ================= */
+#ev{padding:0 clamp(9px,.8vw,16px) 0;display:grid;gap:clamp(7px,.6vw,12px);align-content:start}
+/* STICKY HEAD AND STICKY ACTIONS.
+   The evidence pane holds more than one screen of case file, which is correct — it is
+   a case file. What must never scroll away is (a) WHICH contact this is, and (b) the
+   operator's decision buttons. A judge watching someone hunt for the DISPATCH button
+   has been shown a tool that gets in the way of the decision it exists to support.
+   The middle — wall, breakdown, rationale, limits — scrolls between them. */
+.evhead{
+  position:sticky;top:0;z-index:3;background:var(--panel);
+  padding:clamp(8px,.7vw,13px) 0 7px;margin-bottom:-2px;
+  display:flex;align-items:center;gap:11px;flex-wrap:wrap;border-bottom:1px solid var(--rule);
+}
+.evhead .conf{width:auto;flex:0 0 auto;margin-left:auto;justify-content:flex-end}
+.evhead .conf .track{flex:0 0 clamp(80px,7vw,130px);max-width:none}
+#stickyActions{
+  position:sticky;bottom:0;z-index:3;background:var(--panel);
+  padding:8px 0 clamp(8px,.7vw,13px);border-top:2px solid var(--rule);margin-top:2px;
+}
+.evhead .mmsi{font:800 var(--f-big)/1.05 ui-monospace,Menlo,monospace}
+.card{background:var(--raised);border:1px solid var(--rule);border-radius:7px;padding:clamp(7px,.6vw,12px)}
+.card>h3+*{margin-top:0}
+.card>h3{
+  font-size:var(--f-label);font-weight:800;letter-spacing:.13em;text-transform:uppercase;
+  color:var(--muted);margin-bottom:8px;display:flex;align-items:center;gap:9px;
+}
+
+/* the claimed / observed wall, rendered as a wall */
+table.wall{width:100%;border-collapse:collapse;font-size:var(--f-body)}
+table.wall th{
+  text-align:left;font-size:var(--f-label);letter-spacing:.1em;text-transform:uppercase;
+  padding:0 8px 6px;border-bottom:2px solid var(--rule);
+}
+table.wall th.c{color:var(--claimed)} table.wall th.o{color:var(--observed)}
+table.wall td{padding:4px 8px;border-bottom:1px solid #222c38;vertical-align:top}
+table.wall td.dim{color:var(--muted);font-size:var(--f-label);text-transform:uppercase;letter-spacing:.07em;white-space:nowrap}
+table.wall td.c{color:var(--claimed);font-weight:700}
+table.wall td.o{color:var(--observed);font-weight:700}
+tr.mm td{background:#2a1418}
+tr.mm td.dim{color:var(--spoof);font-weight:800}
+.sig{display:block;color:var(--spoof);font-size:var(--f-label);font-weight:800;margin-top:3px}
+.sig .expl{color:var(--muted);font-weight:600}
+
+/* priority breakdown bars */
+.bars{display:grid;gap:6px}
+.bar{display:grid;grid-template-columns:clamp(120px,9.5vw,180px) 1fr auto;gap:9px;align-items:center;font-size:var(--f-label)}
+.bar .nm{color:var(--fg2);text-transform:uppercase;letter-spacing:.06em;font-weight:700}
+.bar .t{height:15px;background:#05070a;border:1px solid var(--rule);border-radius:2px;overflow:hidden}
+.bar .f{height:100%;background:var(--accent)}
+.bar .v{font:800 var(--f-label)/1 ui-monospace,Menlo,monospace;color:var(--fg)}
+.bar.total{border-top:2px solid var(--rule);padding-top:6px;margin-top:3px}
+.bar.total .nm,.bar.total .v{color:var(--fg);font-weight:900}
+
+.rat{font-size:var(--f-body);color:var(--fg2);line-height:1.5}
+.attrib{margin-top:7px;font-size:var(--f-micro);color:var(--muted);letter-spacing:.05em}
+ul.lims{list-style:none;display:grid;gap:6px}
+ul.lims li{padding-left:17px;position:relative;color:var(--fg2);font-size:var(--f-label);line-height:1.4}
+ul.lims li::before{content:"—";position:absolute;left:0;color:var(--defer);font-weight:800}
+
+#actions{display:grid;grid-template-columns:repeat(4,1fr);gap:7px}
+button.act{
+  padding:clamp(8px,.75vw,15px) 6px;background:var(--panel);color:var(--fg);
+  border:2px solid var(--rule);border-radius:6px;cursor:pointer;
+  font:800 var(--f-label)/1.2 inherit;letter-spacing:.07em;text-transform:uppercase;
+}
+button.act:hover{background:var(--raised);border-color:var(--fg2)}
+button.act:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+button.act.primary{border-color:var(--ok);color:var(--ok)}
+button.act.danger{border-color:var(--spoof);color:var(--spoof)}
+button.act:disabled{opacity:.45;cursor:not-allowed}
+#ack{font-size:var(--f-label);font-weight:700;min-height:1.4em;color:var(--ok)}
+#ack.bad{color:var(--spoof)}
+
+#evEmpty{padding:clamp(16px,1.6vw,34px);color:var(--muted);font-size:var(--f-lead);line-height:1.5}
+#evEmpty b{color:var(--fg2)}
+
+/* ---- degraded / reconnecting ------------------------------------------------
+   A console that loses its feed must look DIFFERENT, not merely be different. The
+   dangerous failure is not a blank page — a blank page is obvious. It is a page that
+   goes on looking exactly like a live watch screen while the sea it depicts has moved
+   on. So the data STAYS (never blank) and the whole grid is visibly de-saturated with
+   a banner naming the age of what is on it. */
+#linkBanner{
+  display:none;grid-column:1/-1;align-items:center;gap:14px;flex-wrap:wrap;
+  background:#3a2a0d;border-bottom:2px solid var(--dark);color:var(--fg);
+  padding:7px clamp(10px,1vw,18px);font-size:var(--f-body);font-weight:700;
+}
+#linkBanner.on{display:flex}
+#linkBanner b{color:var(--dark);letter-spacing:.06em}
+#linkBanner .mono{color:var(--fg2)}
+body.degraded #grid{filter:saturate(.38) brightness(.82)}
+body.degraded .pane>h2::after{content:" · STALE";color:var(--dark);font-weight:800}
+
+.badge.inj{color:var(--unknown);border-style:dashed}
+#cInject{display:none}
+#cInject.on{display:inline-flex;color:var(--unknown)}
+
+#idAlarm{
+  display:none;grid-column:1/-1;background:#3a0f14;border:2px solid var(--spoof);
+  color:var(--fg);padding:9px 14px;font-weight:800;font-size:var(--f-body);letter-spacing:.03em;
+}
+#idAlarm.on{display:block}
+.hint{color:var(--muted);font-size:var(--f-micro);letter-spacing:.04em}
+</style>
+</head>
+<body>
+<div id="app">
+
+<header>
+  <h1>MARITIME APPROACHES <span class="sub">/ WATCH CONSOLE</span></h1>
+  <span class="chip" id="cTransport"><span class="dot" id="dTransport"></span><span id="tTransport">connecting</span></span>
+  <span class="chip" id="cIdent">identities <b id="tIdent">—</b></span>
+  <span class="chip" id="cSeq">seq <b class="mono" id="tSeq">0</b></span>
+  <span class="chip" id="cAge">updated <b class="mono" id="tAge">—</b></span>
+  <span class="chip" id="cInject">injected <b id="tInject">—</b></span>
+  <div class="spacer"></div>
+  <span class="chip">operator <input id="opid" value="operator-1" aria-label="operator id" spellcheck="false"></span>
+  <span class="chip" id="cClock"><span class="mono" id="tClock">--:--:--</span> UTC</span>
+</header>
+
+<div id="grid">
+  <div id="linkBanner" role="status" aria-live="polite"></div>
+
+  <!-- 1 ------------------------------------------------------------------ -->
+  <section class="pane" aria-label="Live sensor">
+    <h2>1 · Live sensor <span class="crit">criterion 1 — observed</span></h2>
+    <div class="body">
+      <div id="sensorWrap">
+        <img id="feed" class="hidden" alt="Live sensor feed">
+        <svg id="boxes" viewBox="0 0 1920 1080" preserveAspectRatio="xMidYMid meet" aria-hidden="true"></svg>
+        <div id="frameEdge" class="hidden"></div>
+        <div id="noVideo"></div>
+        <div id="sensorBadges">
+          <span class="chip" id="cSource">—</span>
+          <span class="chip" id="cFps">fps <b id="tFps">—</b></span>
+          <span class="chip" id="cNode"><span class="dot" id="dNode"></span><span id="tNode">no node</span></span>
+        </div>
+        <div id="sensorFoot"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 2 ------------------------------------------------------------------ -->
+  <section class="pane" aria-label="Map">
+    <h2>2 · Tactical picture <span class="crit">claimed vs observed</span></h2>
+    <div class="body">
+      <div id="map"></div>
+      <div id="mapBadges">
+        <span class="chip" id="cBasemap">no basemap · offline-safe</span>
+      </div>
+      <div id="legend">
+        <span><i style="border-color:var(--claimed)"></i>AIS claim (position broadcast)</span>
+        <span><i style="border-color:var(--observed)"></i>camera observation + uncertainty</span>
+        <span><i style="border-color:var(--spoof)"></i>SPOOF &nbsp;<i style="border-color:var(--dark)"></i>DARK &nbsp;<i style="border-color:var(--match)"></i>MATCH</span>
+        <span><i style="border-color:var(--ok);border-top-style:dashed"></i>protected infrastructure</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3 ------------------------------------------------------------------ -->
+  <section class="pane" aria-label="Priority queue">
+    <h2>3 · Priority queue <span class="crit">criterion 2 — which contact gets the boat</span></h2>
+    <div class="body">
+      <ol id="queue"></ol>
+      <div id="queueEmpty">Waiting for the first ranked picture…</div>
+    </div>
+  </section>
+
+  <!-- 4 ------------------------------------------------------------------ -->
+  <section class="pane" aria-label="Evidence">
+    <h2>4 · Evidence <span class="crit">criterion 4 — and where it defers</span></h2>
+    <div class="body">
+      <div id="idAlarm"></div>
+      <div id="evEmpty">Select a contact in the <b>priority queue</b> to open its case file:
+        the claim beside the observation, the mismatch that separates them, the factors
+        that ranked it, and what would change the answer.</div>
+      <div id="ev" hidden></div>
+    </div>
+  </section>
+
+</div>
+</div>
+
+<script>
+"use strict";
+/* ===========================================================================
+   0. STATE
+   One object. The renderers are pure functions of it, so there is exactly one
+   place to look when the screen disagrees with the pipeline.
+   =========================================================================== */
+const S = {
+  stage:   null,              // pose / infrastructure / asset / caveat / scoring
+  records: new Map(),         // record_id -> EvidenceRecord
+  byVerdict: new Map(),       // verdict_id -> record_id
+  nodes:   new Map(),         // node_id  -> SensorNode
+  loose:   new Map(),         // contact_id -> EoContact  (seen, not yet adjudicated)
+  lastSeq: 0,
+  selected: null,             // record_id
+  transport: "connecting",    // connecting | ws | poll | down
+  identities: "—",
+  prevRank: new Map(),        // record_id -> rank, for the re-rank animation
+  staleAfterS: null,          // the SERVER's staleness threshold, from /health
+  injection: null,            // the active scripted injection, or null
+  lastPaint: 0,               // when the picture last changed. Freshness, not liveness.
+  attempt: 0,                 // consecutive failed connection attempts
+  pollOk: true,               // is the REST fallback itself working?
+  connecting: false,          // a socket open is in flight
+  nextTryAt: 0,               // epoch ms of the next reconnect
+  serverBoot: null,           // detects a server RESTART, not merely a dropped socket
+};
+
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, txt) => { const n = document.createElement(tag);
+  if (cls) n.className = cls; if (txt !== undefined) n.textContent = txt; return n; };
+const fmt = (v, d = 1) => (v === null || v === undefined || Number.isNaN(v)) ? "—" : Number(v).toFixed(d);
+const pct = (v) => (v === null || v === undefined) ? "—" : Math.round(v * 100) + "%";
+
+/* ---------------------------------------------------------------------------
+   IDENTITY RENDERING — DEFENCE IN DEPTH.
+   The server pseudonymises every record before it leaves the machine (two record
+   stores in ConsoleBackend). This function is the SECOND lock: if an MMSI that is
+   not 999-prefixed reaches this page while the server claims to be pseudonymising,
+   the console REFUSES to print it and raises a banner instead.
+   Why bother when the server already does it: naming a real vessel as a suspect on a
+   projector is the one failure in this project that cannot be walked back, and a
+   single forgotten call site upstream is all it takes. A guard that never fires costs
+   nothing; a guard that fires once has paid for the whole project.
+   --------------------------------------------------------------------------- */
+const SYNTH_MID = "999";
+function renderIdent(mmsi) {
+  if (!mmsi) return { text: "NO AIS CLAIM", safe: true };
+  if (S.identities === "REAL") return { text: String(mmsi), safe: true }; // explicit operator opt-in
+  if (String(mmsi).startsWith(SYNTH_MID)) return { text: String(mmsi), safe: true };
+  return { text: "REDACTED", safe: false };
+}
+function raiseIdAlarm(mmsiLike) {
+  const box = $("idAlarm");
+  box.textContent = "IDENTITY GUARD TRIPPED — the server sent an identifier that is "
+    + "not pseudonymised (" + String(mmsiLike).slice(0, 4) + "…). It has been withheld "
+    + "from this screen. Do not present this session; restart the server without "
+    + "--allow-real-identities.";
+  box.classList.add("on");
+}
+
+/* ===========================================================================
+   1. GEOMETRY FOR DISPLAY ONLY
+   Spherical, not WGS84. Over the 8 km this scene spans the difference is well
+   under a metre — far inside the 218 m cross-range and 1250 m along-range sigmas
+   lane B measured at 5 km — so it cannot change anything a viewer concludes.
+   Stated rather than assumed, because a geodesy shortcut that is fine for drawing
+   is not fine for a verdict, and this file must never be mistaken for the latter.
+   NOTHING HERE FEEDS A DECISION. The pipeline computed every number on screen.
+   =========================================================================== */
+const R_EARTH = 6371008.8;
+const rad = (d) => d * Math.PI / 180, deg = (r) => r * 180 / Math.PI;
+function destination(lat, lon, bearingDeg, distM) {
+  const d = distM / R_EARTH, br = rad(bearingDeg), p1 = rad(lat), l1 = rad(lon);
+  const p2 = Math.asin(Math.sin(p1) * Math.cos(d) + Math.cos(p1) * Math.sin(d) * Math.cos(br));
+  const l2 = l1 + Math.atan2(Math.sin(br) * Math.sin(d) * Math.cos(p1),
+                             Math.cos(d) - Math.sin(p1) * Math.sin(p2));
+  return [deg(p2), deg(l2)];
+}
+
+/* ===========================================================================
+   2. LEAFLET LOADER — local first, CDN second.
+   README records "no CDN" as a deliberate choice, and that reasoning is sound: a
+   demo that needs the internet to draw a map is a demo that does not run in a
+   basement. Leaflet is used here on explicit instruction, so the risk is bounded
+   instead of accepted — a local copy under 03_src/web/ wins if it exists, and the
+   handoff carries the one curl that puts it there. No local copy, working wifi: the
+   CDN answers. No local copy, no wifi: the map pane says so in words and the other
+   three panes are untouched, because nothing else on this screen depends on Leaflet.
+   =========================================================================== */
+const CDN = "https://unpkg.com/leaflet@1.9.4/dist/";
+const CDN2 = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/";
+function loadOne(kind, urls) {
+  return new Promise((resolve, reject) => {
+    const tryNext = (i) => {
+      if (i >= urls.length) return reject(new Error("all sources failed"));
+      const n = kind === "js" ? document.createElement("script") : document.createElement("link");
+      if (kind === "js") { n.src = urls[i]; } else { n.rel = "stylesheet"; n.href = urls[i]; }
+      n.onload = () => resolve(urls[i]);
+      n.onerror = () => { n.remove(); tryNext(i + 1); };
+      document.head.appendChild(n);
+    };
+    tryNext(0);
+  });
+}
+async function loadLeaflet() {
+  await loadOne("css", ["/assets/leaflet.css", CDN + "leaflet.css", CDN2 + "leaflet.min.css"]).catch(() => {});
+  return loadOne("js", ["/assets/leaflet.js", CDN + "leaflet.js", CDN2 + "leaflet.min.js"]);
+}
+
+/* ===========================================================================
+   3. TRANSPORT
+   =========================================================================== */
+function setTransport(mode, detail) {
+  /* THREE STATES, AND THE MIDDLE ONE MUST BE EARNED.
+       ws    the socket is open — live.
+       poll  the socket is down AND the REST fallback is ANSWERING. Degraded but true.
+       down  neither is answering. The picture on screen is history.
+     "poll" is only ever displayed when a fetch has actually succeeded (S.pollOk).
+     Before this was enforced, every failed reconnect attempt ended in onclose and set
+     "poll" unconditionally, so a dead server produced the reassuring sentence "the
+     picture below is live but slower" — about a fallback that was also dead. */
+  if (mode === "poll" && !S.pollOk) mode = "down";
+  S.transport = mode;
+  const d = $("dTransport"), t = $("tTransport");
+  d.className = "dot " + (mode === "ws" ? "on" : mode === "down" ? "off" : "");
+  t.textContent = mode === "ws" ? "live · websocket"
+                : mode === "poll" ? "polling 2 s (socket down)"
+                : mode === "down" ? "SERVER UNREACHABLE" : "connecting";
+  if (detail) t.title = detail;
+}
+
+async function fetchState() {
+  const r = await fetch("/api/state", { cache: "no-store" });
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  return r.json();
+}
+
+/* Apply a full /api/state payload: the stage AND the record bodies. */
+function applyState(st) {
+  S.stage = st;
+  S.identities = st.identities || "PSEUDONYMISED";
+  $("tIdent").textContent = S.identities === "REAL" ? "REAL — DO NOT PRESENT" : "pseudonymised";
+  $("cIdent").style.color = S.identities === "REAL" ? "var(--spoof)" : "";
+  S.injection = st.injection || null;
+  S.records.clear(); S.byVerdict.clear();
+  for (const rec of (st.records || [])) ingestRecord(rec);
+  restoreSelection();
+  markPainted();
+  renderAll();
+  renderLink();
+}
+
+/* ---------------------------------------------------------------------------
+   REFRESH SAFETY.
+   The DATA half is the server's job and contracts.py already solves it: ConsoleState
+   is the whole picture in one message, so a refresh repaints from one round trip.
+   What the server cannot restore is what the OPERATOR had in front of them — which
+   contact they were reading. Losing that on refresh is small in a test and large on
+   stage, because the recovery is "find the row again" while a judge waits.
+   sessionStorage rather than localStorage on purpose: it survives a refresh, which is
+   the case being defended, and does NOT survive closing the tab, so tomorrow's demo
+   does not open on yesterday's selection. Wrapped in try/catch because a browser with
+   site data blocked throws on ACCESS, not on read — and a console that will not start
+   because it cannot remember a selection has traded a small problem for a total one.
+   --------------------------------------------------------------------------- */
+function rememberSelection(rid) {
+  try { sessionStorage.setItem("sel", rid || ""); } catch {}
+}
+function restoreSelection() {
+  let want = S.selected;
+  if (!want) { try { want = sessionStorage.getItem("sel") || null; } catch {} }
+  if (want && S.records.has(want)) { S.selected = want; return; }
+  if (want) {
+    /* The remembered contact is gone — a different scene, or an injection replaced it.
+       Say so rather than silently selecting something else, because "the panel is
+       showing a different vessel than it was" is exactly the kind of quiet substitution
+       that makes an operator distrust a tool. */
+    flashLink("the contact you had selected is no longer in the picture");
+    S.selected = null;
+  }
+  try { sessionStorage.removeItem("sel"); } catch {}
+}
+
+function markPainted() { S.lastPaint = Date.now(); }
+
+function ingestRecord(rec) {
+  S.records.set(rec.record_id, rec);
+  if (rec.verdict) S.byVerdict.set(rec.verdict.verdict_id, rec.record_id);
+  /* Once a contact is adjudicated it is no longer "seen but not yet judged". Without
+     this it stays in S.loose forever and the sensor pane draws its box twice — once
+     grey as unresolved and once coloured by verdict. */
+  if (rec.eo_contact) S.loose.delete(rec.eo_contact.contact_id);
+}
+
+/* ---- the WebSocket. First message is a ConsoleState, the rest are events. ---- */
+let ws = null, pollTimer = null, reconnectTimer = null;
+
+function startPolling() {
+  if (pollTimer) return;
+  pollTimer = setInterval(async () => {
+    try {
+      applyState(await fetchState());
+      S.pollOk = true;
+      setTransport(S.transport === "ws" ? "ws" : "poll");
+      /* THE POLL DOUBLES AS A LIVENESS PROBE FOR THE SOCKET — measured fix.
+         The rehearsal timed recovery at 1.48 s when the restart happened early in the
+         backoff and 7.09 s when it landed just after a failed attempt at the 8 s cap.
+         The variance is the whole problem: on stage the number that matters is the
+         WORST case, and waiting out a backoff we already know is unnecessary is pure
+         cost. A successful fetch is proof the server is back, so the pending retry is
+         cancelled and the socket is reopened immediately. This bounds recovery at one
+         poll interval (2 s) plus a handshake, INDEPENDENT of how far the backoff had
+         escalated. Backing off remains correct for the case with no other evidence;
+         this is the case where there is evidence. */
+      if (!ws && !S.connecting) {
+        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+        S.attempt = 0; S.nextTryAt = 0;
+        connect();
+      }
+      /* NODE PROVENANCE IN THE FALLBACK PATH. /api/state carries the picture but not
+         the sensors — nodes live on ConsoleState, which only the socket delivers. In
+         poll mode /health is the only source, and without this the console reports
+         "no node" beside a healthy sensor, which is the dead-Pi indication. A wrong
+         provenance badge is worse than none. */
+      const h = await (await fetch("/health", { cache: "no-store" })).json();
+      if (h.node_stale_after_s) S.staleAfterS = h.node_stale_after_s;
+      S.nodes.clear(); for (const nd of (h.nodes || [])) S.nodes.set(nd.node_id, nd);
+      renderSensor();
+    } catch (e) {
+      S.pollOk = false;
+      setTransport("down", String(e));
+      renderLink();
+    }
+  }, 2000);
+}
+function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+function connect() {
+  const url = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws";
+  if (S.connecting) return;
+  S.connecting = true;
+  try { ws = new WebSocket(url); }
+  catch (e) { S.connecting = false; setTransport("poll"); startPolling(); return; }
+
+  ws.onopen = () => {
+    /* Reset the backoff on a SUCCESSFUL open, not on an attempt. A server that accepts
+       the TCP connection and then closes it immediately would otherwise reset the
+       schedule every time and turn the backoff into a busy loop. */
+    S.attempt = 0; S.nextTryAt = 0; S.connecting = false;
+    setTransport("ws"); stopPolling(); renderLink();
+  };
+
+  ws.onmessage = (m) => {
+    let msg; try { msg = JSON.parse(m.data); } catch { return; }
+
+    /* THE SNAPSHOT / STREAM JOIN, exactly as contracts.py section 8 specifies it.
+       A ConsoleState has last_seq and no `event` tag. Applying it and then ignoring
+       every event with seq <= last_seq is what stops a refresh from double-applying
+       events already baked into the snapshot, or skipping ones that are not. */
+    if (msg.last_seq !== undefined && msg.event === undefined) {
+      /* SERVER-RESTART DETECTION, AND A BUG THIS FIXES.
+         `seq` is monotonic PER CONNECTION and the server's counter starts again at 0
+         when the process restarts. A client that kept its old lastSeq across a restart
+         would discard every event from the new server as "already folded in" — the
+         page would reconnect, look connected, and then never update again. That is the
+         worst of the three failure modes in this section, because it is invisible.
+         The snapshot's last_seq is therefore ASSIGNED, never max()'d, and a last_seq
+         lower than the one we held is the signature of a restart.
+
+         PRECISELY WHAT THIS DETECTS, because the rehearsal showed it is narrower than
+         "detects restarts": it fires when the client holds a HIGHER seq than the server
+         now has — which is exactly the case that would otherwise stall the stream. A
+         server that restarts having emitted nothing (last_seq 0, client also at 0) is
+         NOT announced, and should not be: nothing was lost and nothing is broken. The
+         notice exists to explain a discontinuity, not to narrate the server's lifecycle. */
+      const restarted = S.serverBoot !== null && msg.last_seq < S.lastSeq;
+      S.serverBoot = msg.state_time_utc;
+      S.lastSeq = msg.last_seq;
+      if (restarted) flashLink("SERVER RESTARTED — picture rebuilt from its snapshot");
+      S.nodes.clear(); for (const n of (msg.nodes || [])) S.nodes.set(n.node_id, n);
+      S.records.clear(); S.byVerdict.clear();
+      for (const rec of (msg.records || [])) ingestRecord(rec);
+      S.loose.clear(); for (const c of (msg.unresolved_contacts || [])) S.loose.set(c.contact_id, c);
+      $("tSeq").textContent = S.lastSeq;
+      restoreSelection();
+      markPainted();
+      renderAll();
+      renderLink();
+      return;
+    }
+    if (msg.seq !== undefined && msg.seq <= S.lastSeq) return;  // already folded in
+
+    /* GAP DETECTION. seq is monotonic and gap-free per connection, so a jump means an
+       event was lost. The honest response is to stop trusting the incremental picture
+       and re-fetch the whole one — NOT to keep painting, which is how a console ends
+       up showing a ranking the prioritiser no longer holds with nothing on screen
+       saying so. */
+    if (msg.seq !== undefined && S.lastSeq && msg.seq > S.lastSeq + 1) {
+      console.warn("stream gap: expected " + (S.lastSeq + 1) + ", got " + msg.seq);
+      S.lastSeq = msg.seq;
+      fetchState().then(applyState).catch(() => {});
+      return;
+    }
+    if (msg.seq !== undefined) S.lastSeq = msg.seq;
+    $("tSeq").textContent = S.lastSeq;
+    applyEvent(msg);
+    markPainted();
+    renderLink();
+  };
+
+  ws.onclose = () => {
+    ws = null; S.connecting = false;
+    setTransport("poll");   // downgraded to "down" by setTransport if polls are failing too
+    startPolling();     // the REST picture keeps updating even with no socket
+    scheduleReconnect();
+  };
+  ws.onerror = () => { try { ws.close(); } catch {} };
+}
+
+/* BACKOFF SCHEDULE: 0.5, 1, 2, 4, 8 s, then 8 s forever, each with +/-25% jitter.
+   WHY IT IS CAPPED AT 8 s AND NOT THE USUAL 30-60: this is a four-minute pitch. A
+   schedule tuned for a datacentre would leave the console dark for half the slot after
+   a blip. Eight seconds is long enough that a genuinely dead server is not being
+   hammered, short enough that a restart is invisible to the audience.
+   WHY IT BACKS OFF AT ALL rather than retrying every 500 ms: a server that is down
+   because it is overloaded is not helped by a client retrying twenty times a second,
+   and the first few fast retries already cover the common case (a restart).
+   WHY JITTER: two consoles open on the same laptop would otherwise reconnect in
+   lockstep forever, which is the one thing that turns a blip into a pattern. */
+const BACKOFF_MS = [500, 1000, 2000, 4000, 8000];
+function backoffDelay(attempt) {
+  const base = BACKOFF_MS[Math.min(attempt, BACKOFF_MS.length - 1)];
+  return Math.round(base * (0.75 + Math.random() * 0.5));
+}
+function scheduleReconnect() {
+  if (reconnectTimer) return;
+  const wait = backoffDelay(S.attempt);
+  S.attempt += 1;
+  S.nextTryAt = Date.now() + wait;
+  reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, wait);
+  renderLink();
+}
+
+/* ---------------------------------------------------------------------------
+   THE LINK BANNER — "never blank, never frozen".
+   Blank is easy to spot. FROZEN IS NOT: a watch screen that stopped updating looks
+   identical to one showing a quiet sea, and an operator reads the second. So the
+   picture is kept (never blank) and the page states the AGE of what is on it, degrades
+   its own colour, and says when it will try again.
+   --------------------------------------------------------------------------- */
+let flashUntil = 0, flashMsg = "";
+function flashLink(msg) { flashMsg = msg; flashUntil = Date.now() + 8000; renderLink(); }
+
+function renderLink() {
+  const b = $("linkBanner");
+  const ageS = S.lastPaint ? Math.round((Date.now() - S.lastPaint) / 1000) : null;
+  $("tAge").textContent = ageS === null ? "—" : ageS + " s ago";
+  $("cAge").style.color = (ageS !== null && ageS > 30) ? "var(--dark)" : "";
+
+  const live = S.transport === "ws";
+  const flashing = Date.now() < flashUntil;
+  document.body.classList.toggle("degraded", !live && S.transport !== "poll");
+
+  if (live && !flashing) { b.classList.remove("on"); b.replaceChildren(); return; }
+
+  b.replaceChildren();
+  if (flashing) {
+    b.appendChild(el("b", null, "NOTE"));
+    b.appendChild(el("span", null, flashMsg));
+  }
+  if (!live) {
+    const inS = S.nextTryAt ? Math.max(0, Math.round((S.nextTryAt - Date.now()) / 1000)) : 0;
+    b.appendChild(el("b", null,
+      S.transport === "poll" ? "WEBSOCKET DOWN" : "SERVER UNREACHABLE"));
+    b.appendChild(el("span", null,
+      S.transport === "poll"
+        ? "the socket is down; the REST fallback IS answering, so the picture below is "
+          + "current but up to 2 s behind"
+        : "neither the socket nor the REST fallback is answering. THE PICTURE BELOW IS "
+          + "HISTORY — it is not being updated."));
+    b.appendChild(el("span", "mono",
+      `last update ${ageS === null ? "never" : ageS + " s ago"} · retry in ${inS} s · attempt ${S.attempt}`));
+  }
+  b.classList.add("on");
+}
+
+/* Injected-scenario provenance. Read from frame_ref, which is a real EoContact field,
+   so this is the SAME fact the exported case file carries — not a parallel UI flag
+   that could disagree with it. */
+function isInjected(rec) {
+  const f = rec?.eo_contact?.frame_ref || "";
+  if (f.startsWith("injected://")) return true;
+  return (rec?.frame_refs || []).some(x => String(x).startsWith("injected://"));
+}
+function injectedScenario(rec) {
+  const f = rec?.eo_contact?.frame_ref
+    || (rec?.frame_refs || []).find(x => String(x).startsWith("injected://")) || "";
+  const m = /^injected:\/\/([^/]+)\//.exec(f);
+  return m ? m[1] : "injected";
+}
+
+function applyEvent(ev) {
+  switch (ev.event) {
+    case "node_status":
+      S.nodes.set(ev.node.node_id, ev.node);
+      renderSensor();
+      break;
+
+    case "contact_update":
+      if (ev.eo_contact) S.loose.set(ev.eo_contact.contact_id, ev.eo_contact);
+      renderSensor(); renderMap();
+      break;
+
+    case "verdict_update": {
+      /* Patch the verdict and its mismatches onto the record we already hold. If the
+         verdict is unknown this is a NEW adjudication whose full EvidenceRecord (the
+         rationale, the limitations, the priority breakdown) only exists server-side —
+         so fetch the bodies rather than render a half-populated case file. */
+      const rid = S.byVerdict.get(ev.verdict.verdict_id);
+      if (!rid) { fetchState().then(applyState).catch(() => {}); return; }
+      const rec = S.records.get(rid);
+      rec.verdict = ev.verdict; rec.mismatches = ev.mismatches || [];
+      renderQueue(); if (S.selected === rid) renderEvidence();
+      break;
+    }
+
+    case "queue_update": {
+      /* WHOLE-LIST REPLACEMENT, matching the server. A ranking is a total order; a
+         patched entry would put the console in an order the prioritiser never
+         produced. This is the event the judge is meant to SEE — renderQueue animates
+         every row from where it was to where it now is. */
+      for (const p of (ev.queue || [])) {
+        const rid = S.byVerdict.get(p.verdict_id);
+        if (rid) S.records.get(rid).priority = p;
+      }
+      renderQueue(); renderMap(); if (S.selected) renderEvidence();
+      break;
+    }
+
+    case "operator_action_ack":
+      showAck(ev);
+      break;
+  }
+}
+</script>
+
+<script>
+"use strict";
+/* ===========================================================================
+   4. DERIVED VIEWS — no decisions, only readings of what the pipeline produced.
+   =========================================================================== */
+const MS_TO_KN = 1.943844;
+
+function ranked() {
+  return [...S.records.values()].filter(r => r.priority)
+    .sort((a, b) => a.priority.rank - b.priority.rank);
+}
+
+/* THE TOP CONTRIBUTING FACTOR, IN WORDS — criterion 2's "and here is why".
+   Ordered by CONTRIBUTION (score x weight), never by weight, because the question is
+   "why is THIS one first" and the answer is whichever term actually moved it — which
+   is not always the heaviest. This mirrors prioritizer.explain() exactly; if the two
+   ever disagree, prioritizer.py is right and this is the bug. */
+function topFactor(p) {
+  const rows = Object.keys(p.component_scores || {}).map(k => ({
+    k, sc: p.component_scores[k], wt: p.component_weights[k] || 0,
+    c: p.component_scores[k] * (p.component_weights[k] || 0),
+  })).sort((a, b) => b.c - a.c);
+  if (!rows.length) return { text: "no breakdown published", share: 0, rows: [] };
+  const t = rows[0], share = p.score > 0 ? t.c / p.score : 0;
+  const words = {
+    infrastructure_proximity: p.nearest_infrastructure_m !== null && p.nearest_infrastructure_m !== undefined
+      ? `${fmt(p.nearest_infrastructure_m, 0)} m from ${p.nearest_infrastructure_id || "protected infrastructure"}`
+      : "close to protected infrastructure",
+    verdict_severity: "the verdict itself",
+    behaviour_anomaly: "anomalous behaviour on its own track",
+    actionability: p.time_to_intercept_min !== null && p.time_to_intercept_min !== undefined
+      ? `reachable in ${fmt(p.time_to_intercept_min, 0)} min` : "the asset can reach it",
+    confidence: "confidence in the label",
+  };
+  return { text: words[t.k] || t.k, key: t.k, share, rows };
+}
+
+/* "WHAT WOULD CHANGE THIS ANSWER" — deterministic, derived from the record's own
+   structure, never written by a model. Each line states the specific observation that
+   would move the verdict. These are the modules' OWN recorded limits (association.py
+   line 25, eo_detector.py line 48, ais_ingest.py line 48), surfaced where an operator
+   can act on them rather than left in a source comment. */
+function whatWouldChange(rec) {
+  const out = [], dims = new Set((rec.mismatches || []).map(m => m.dimension));
+  const label = rec.verdict?.label;
+  if (dims.has("position"))
+    out.push("A displacement ALONG the line of sight is undetectable by one monocular "
+      + "sensor at any offset. A second baseline, a radar cut, or the vessel moving "
+      + "across the bearing would settle it.");
+  if (dims.has("length") || dims.has("width"))
+    out.push("An independent range. Observed length is pixel extent x range, so a range "
+      + "error scales the length linearly — a second sensor or a marked horizon "
+      + "tightens this directly.");
+  if (dims.has("class"))
+    out.push("A closer or longer look at the silhouette. A class disagreement alone "
+      + "cannot reach SPOOF; it needs a second dimension to corroborate it.");
+  if (dims.has("heading") || dims.has("cog") || dims.has("speed"))
+    out.push("More frames. Heading and speed are motion-derived, so track length is "
+      + "what makes them trustworthy.");
+  if (label === "DARK")
+    out.push("An AIS report from this position would end it. So would evidence that the "
+      + "silence is receiver coverage rather than a switched-off transponder — those "
+      + "are indistinguishable in this data and the tool does not pretend otherwise.");
+  if (label === "MATCH")
+    out.push("A mismatch appearing on any dimension, or the pairing turning out to be "
+      + "the wrong hull. A MATCH is 'nothing separates them yet', not 'this vessel is "
+      + "cleared'.");
+  if (rec.verdict?.defer_to_human)
+    out.push("This verdict is below the tool's own decision threshold. It is being put "
+      + "to a human on purpose; the tool is not withholding an opinion it has.");
+  return out;
+}
+
+/* ===========================================================================
+   5. PANE 1 — LIVE SENSOR
+   =========================================================================== */
+const SOURCE_WORDS = { edge_pi: "EDGE PI", mac_camera: "MAC CAM", file: "RECORDED" };
+
+function renderSensor() {
+  const nodes = [...S.nodes.values()];
+  /* The node that matters is the one producing contacts. A `file` node is the
+     replayed scene — real provenance, not a placeholder, and labelled RECORDED so
+     nobody watching mistakes a projection for an observation. */
+  const live = nodes.find(n => n.kind !== "file") || nodes[0] || null;
+
+  $("cSource").textContent = live ? (SOURCE_WORDS[live.kind] || live.kind) : "NO SOURCE";
+  $("cSource").style.color = live && live.kind === "file" ? "var(--muted)" : "var(--accent)";
+
+  /* measured_fps is null unless the node COUNTED frames. The server refuses to
+     substitute its own POST rate — pi_sensor batches on --interval, so the two are
+     different numbers. "not reported" is the honest render; a plausible figure here
+     would be the exact overclaim contracts.SensorNode.measured_fps exists to stop. */
+  $("tFps").textContent = (live && live.measured_fps !== null && live.measured_fps !== undefined)
+    ? fmt(live.measured_fps, 1) : "not reported";
+  $("tFps").style.color = (live && live.measured_fps != null) ? "var(--fg)" : "var(--muted)";
+
+  const dn = $("dNode"), tn = $("tNode");
+  if (!live) { dn.className = "dot"; tn.textContent = "no node"; }
+  else {
+    dn.className = "dot " + (live.online ? "on" : "off");
+    const seen = live.last_seen ? new Date(live.last_seen) : null;
+    const age = seen ? Math.round((Date.now() - seen.getTime()) / 1000) : null;
+    /* THE BELIEF AGAINST ITS EVIDENCE. contracts.SensorNode carries `online` (what the
+       shore station believes) and `last_seen` (why it believes it) as SEPARATE fields
+       precisely so this disagreement is visible: "a node last seen 40 seconds ago that
+       reports online is a genuinely empty sea, the same node last seen 11 minutes ago
+       is a dead sensor being mistaken for one."
+       The threshold comes from the SERVER (/health), never from a number invented
+       here — a console applying its own staleness rule would contradict the server's
+       and there would be no way to tell which was right. */
+    const limit = S.staleAfterS;
+    const stale = live.online && age !== null && limit && age > limit;
+    tn.textContent = live.node_id + " · " + (live.online ? "online" : "OFFLINE")
+      + (age === null ? " · never heard from" : " · seen " + age + " s ago")
+      + (stale ? " · BELIEF IS STALE" : "");
+    tn.style.color = !live.online ? "var(--off)" : stale ? "var(--dark)" : "";
+  }
+
+  /* Detection boxes. Drawn whether or not imagery is available: the boxes ARE the
+     sensor's output, and showing them over an honest "no imagery" field is better
+     than showing nothing. What is never done is showing a frozen frame — a still on a
+     watch screen is indistinguishable from a live one over calm water. */
+  const pose = S.stage?.pose || {};
+  const W = pose.image_width_px || 1920, H = pose.image_height_px || 1080;
+  const svg = $("boxes");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.replaceChildren();
+
+  /* Four values per box, not three. The COLOUR is looked up as var(--<label>), so the
+     semantic label and the display text have to stay separate — folding "INJ" into the
+     label produced var(--inj spoof), which is not a custom property and renders as no
+     stroke at all: the injected contact would have become the one box you could not
+     see. Caught by re-reading the lookup, not by the parser. */
+  const drawn = [];
+  for (const rec of S.records.values())
+    if (rec.eo_contact)
+      drawn.push([rec.eo_contact, rec.verdict?.label || "UNKNOWN", rec.record_id,
+                  isInjected(rec)]);
+  for (const c of S.loose.values())
+    if (!drawn.some(d => d[0].contact_id === c.contact_id))
+      drawn.push([c, null, null, String(c.frame_ref || "").startsWith("injected://")]);
+
+  const NS = "http://www.w3.org/2000/svg";
+  /* Sort by x so the stagger below alternates between HORIZONTAL neighbours, which is
+     where labels actually collide: vessels cluster on the horizon, so almost every
+     contact shares a y and their labels overlap into an unreadable smear. */
+  drawn.sort((a, b) => a[0].bbox_px[0] - b[0].bbox_px[0]);
+  let li = 0;
+  for (const [c, label, rid, inj] of drawn) {
+    const [x0, y0, x1, y1] = c.bbox_px;
+    const colour = label ? `var(--${label.toLowerCase()})` : "var(--muted)";
+    const g = document.createElementNS(NS, "g");
+    const r = document.createElementNS(NS, "rect");
+    r.setAttribute("x", x0); r.setAttribute("y", y0);
+    r.setAttribute("width", Math.max(1, x1 - x0)); r.setAttribute("height", Math.max(1, y1 - y0));
+    r.setAttribute("fill", "none"); r.setAttribute("stroke", colour);
+    r.setAttribute("stroke-width", rid && rid === S.selected ? 7 : 4);
+    if (inj) r.setAttribute("stroke-dasharray", "14 8");
+    g.appendChild(r);
+    const t = document.createElementNS(NS, "text");
+    t.setAttribute("x", x0);
+    t.setAttribute("y", Math.max(28, y0 - 11 - (li++ % 3) * 34));
+    t.setAttribute("fill", colour); t.setAttribute("font-size", "26");
+    t.setAttribute("font-weight", "800"); t.setAttribute("font-family", "ui-monospace,Menlo,monospace");
+    t.textContent = (inj ? "INJ " : "") + (label ? label + " " : "") + c.contact_id;
+    g.appendChild(t);
+    const lead = document.createElementNS(NS, "line");
+    lead.setAttribute("x1", x0 + 1); lead.setAttribute("x2", x0 + 1);
+    lead.setAttribute("y1", Number(t.getAttribute("y")) + 5); lead.setAttribute("y2", y0);
+    lead.setAttribute("stroke", colour); lead.setAttribute("stroke-width", "2");
+    lead.setAttribute("opacity", ".6");
+    g.appendChild(lead);
+    svg.appendChild(g);
+  }
+
+  const anyInjected = [...S.records.values()].some(isInjected);
+  const chip = $("cInject");
+  chip.classList.toggle("on", anyInjected || !!S.injection);
+  $("tInject").textContent = S.injection?.scenario
+    || (anyInjected ? injectedScenario([...S.records.values()].find(isInjected)) : "—");
+
+  $("sensorFoot").textContent = drawn.length
+    ? `${drawn.length} detection${drawn.length === 1 ? "" : "s"} in frame · boxes are the `
+      + `detector's output, projected at ${W}x${H}`
+    : "no detections in frame";
+}
+
+async function initVideo() {
+  /* Ask /health what the video source actually is rather than guessing from a broken
+     <img>. A 503 here is a CONFIGURATION statement, not a failure, and saying which
+     is the difference between a ten-second fix and ten minutes of guessing. */
+  let health = null;
+  try { health = await (await fetch("/health", { cache: "no-store" })).json(); } catch {}
+  const img0 = $("feed"), no0 = $("noVideo");
+  if (!health) {
+    /* No /health means this is not the shore station — most likely 04_demo/app.py,
+       the stdlib fallback, which serves no video at all. Say that, rather than
+       reporting a stream failure that never happened. */
+    img0.classList.add("hidden");
+    $("frameEdge").classList.remove("hidden");
+    no0.innerHTML = "<strong>NO SENSOR ENDPOINT</strong>This page is talking to a server "
+      + "with no /health and no /stream — almost certainly the stdlib fallback "
+      + "(04_demo/app.py). The pipeline panes are live; video is not available there.";
+    return;
+  }
+  if (health.node_stale_after_s) S.staleAfterS = health.node_stale_after_s;
+  const src = health?.source?.video || "unknown";
+  const img = $("feed"), no = $("noVideo");
+
+  if (src === "none configured") {
+    img.classList.add("hidden");
+    $("frameEdge").classList.remove("hidden");
+    no.innerHTML = "<strong>NO VIDEO SOURCE CONFIGURED</strong>"
+      + "The edge sensor posts contacts, it does not serve video. Detection boxes below "
+      + "are live and real; the imagery behind them is not available on this run.<br><br>"
+      + "<span class='hint'>start with --mjpeg-url &lt;mjpg-streamer url&gt; or --camera 0</span>";
+    return;
+  }
+  no.textContent = "";
+  img.classList.remove("hidden");
+  img.onerror = () => {
+    img.classList.add("hidden");
+    no.innerHTML = "<strong>VIDEO SOURCE STOPPED</strong>"
+      + "The stream was configured (" + src + ") and is not delivering frames. "
+      + "Detection boxes continue from the pipeline.";
+  };
+  img.src = "/stream";
+}
+</script>
+
+<script>
+"use strict";
+/* ===========================================================================
+   6. PANE 2 — MAP
+   =========================================================================== */
+let MAP = null, LAYER = null, fitted = false;
+
+async function initMap() {
+  try { await loadLeaflet(); }
+  catch {
+    $("map").innerHTML = "<div style='padding:22px;color:var(--dark);font-size:var(--f-body);"
+      + "line-height:1.5'><b>MAP LIBRARY UNAVAILABLE.</b><br>Leaflet is not present at "
+      + "/assets/leaflet.js and the CDN could not be reached. The other three panes are "
+      + "unaffected — nothing on this screen except the map depends on it.</div>";
+    return;
+  }
+  MAP = L.map("map", { zoomControl: true, attributionControl: true })
+        .setView([54.60, 11.30], 11);
+
+  /* TILES ARE OPT-IN (?tiles=1). A basemap needs live internet on every pan and zoom,
+     and a half-loaded tile grid on a projector reads as a broken tool. Off, the map
+     draws real geometry on a graticule: deterministic, rehearsable, identical every
+     run. That is worth more in a four-minute pitch than a prettier background. */
+  if (new URLSearchParams(location.search).get("tiles") === "1") {
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+      { maxZoom: 18, attribution: "&copy; OpenStreetMap" }).addTo(MAP);
+    $("cBasemap").textContent = "OSM basemap · needs network";
+  } else {
+    drawGraticule();
+  }
+  LAYER = L.layerGroup().addTo(MAP);
+  renderMap();
+}
+
+function drawGraticule() {
+  for (let lat = 54.3; lat <= 55.0; lat += 0.1)
+    L.polyline([[lat, 10.8], [lat, 11.9]], { color: "#1d2733", weight: 1 }).addTo(MAP);
+  for (let lon = 10.8; lon <= 11.9; lon += 0.1)
+    L.polyline([[54.3, lon], [55.0, lon]], { color: "#1d2733", weight: 1 }).addTo(MAP);
+}
+
+function renderMap() {
+  if (!MAP || !LAYER || !S.stage) return;
+  LAYER.clearLayers();
+  const pose = S.stage.pose || {}, pts = [];
+
+  /* ---- the sensor and what it can actually see ---------------------------
+     The FOV wedge is not decoration. A claim with no observation INSIDE the wedge is
+     a finding; the same claim OUTSIDE it is a vessel the camera simply cannot see.
+     Drawing the boundary is what stops an operator reading the second as the first. */
+  if (pose.lat_deg !== undefined) {
+    const half = pose.fov_half_angle_deg ?? (pose.hfov_deg || 60) / 2;
+    const rng = pose.max_range_m || 8000, b = pose.boresight_deg_true || 0;
+    const arc = [[pose.lat_deg, pose.lon_deg]];
+    for (let a = -half; a <= half; a += 2) arc.push(destination(pose.lat_deg, pose.lon_deg, b + a, rng));
+    arc.push([pose.lat_deg, pose.lon_deg]);
+    L.polygon(arc, { color: "#3d5468", weight: 2, fillColor: "#0e1a24", fillOpacity: .45, interactive: false })
+      .addTo(LAYER).bindTooltip(`sensor field of view · ${fmt(rng / 1000, 1)} km max range`);
+    L.circleMarker([pose.lat_deg, pose.lon_deg], { radius: 8, color: "#7fd4ff", weight: 3, fillOpacity: 1 })
+      .addTo(LAYER).bindTooltip("camera · " + (pose.pose_ref || "pose"));
+    pts.push([pose.lat_deg, pose.lon_deg]);
+  }
+
+  /* ---- protected infrastructure: the cable route as a LINE ---------------- */
+  const infra = S.stage.infrastructure || [];
+  const cable = infra.filter(i => i.kind === "cable").map(i => [i.lat, i.lon]);
+  if (cable.length >= 2) {
+    L.polyline(cable, { color: "#6ee7a8", weight: 5, dashArray: "12 8", opacity: .95 })
+      .addTo(LAYER).bindTooltip("protected route (illustrative, not surveyed)");
+    cable.forEach(p => pts.push(p));
+  }
+  for (const i of infra) {
+    L.circleMarker([i.lat, i.lon], {
+      radius: 7, color: "#6ee7a8", weight: 3, fillColor: "#0d1f18", fillOpacity: 1,
+    }).addTo(LAYER).bindTooltip(`${i.id} — ${i.name}`);
+    pts.push([i.lat, i.lon]);
+  }
+  const a = S.stage.asset;
+  if (a) {
+    L.circleMarker([a.lat, a.lon], { radius: 9, color: "#f4f8fc", weight: 3, fillColor: "#18202a", fillOpacity: 1 })
+      .addTo(LAYER).bindTooltip(`${a.id} — the one patrol asset, ${fmt(a.speed_kn, 0)} kn`);
+    pts.push([a.lat, a.lon]);
+  }
+
+  /* ---- the contacts, with the wall intact -------------------------------- */
+  for (const rec of S.records.values()) {
+    const label = rec.verdict?.label || "UNKNOWN";
+    const colour = { MATCH: "#b6c6d6", DARK: "#ffb64d", SPOOF: "#ff9090", UNKNOWN: "#c9a6ff" }[label];
+    const sel = S.selected === rec.record_id;
+    const w = sel ? 6 : 3;
+    let claimPt = null, obsPt = null;
+
+    if (rec.ais_track) {
+      claimPt = [rec.ais_track.claimed_lat_deg, rec.ais_track.claimed_lon_deg];
+      L.circleMarker(claimPt, { radius: sel ? 11 : 8, color: "#9fc2ff", weight: w,
+        fillColor: colour, fillOpacity: .9 })
+        .addTo(LAYER)
+        .bindTooltip("CLAIMED " + renderIdent(rec.ais_track.claimed_mmsi).text)
+        .on("click", () => select(rec.record_id));
+      pts.push(claimPt);
+    }
+
+    /* THE OBSERVATION IS DRAWN AS AN UNCERTAINTY QUAD, NOT A DOT — and this is the
+       single most honest thing on the map. Lane C measured cross-range sigma at 218 m
+       and along-range sigma at 1250 m at 5 km, so the true shape of a monocular fix is
+       a long thin sliver pointing at the camera, not a circle. A dot would assert a
+       precision this sensor does not have, and it would hide WHY an along-line-of-
+       sight position spoof is undetectable: the quad is stretched in exactly the
+       direction the deception hides in. */
+    const c = rec.eo_contact;
+    if (c && pose.lat_deg !== undefined && c.observed_range_m) {
+      const br = c.observed_bearing_deg_true, db = c.bearing_uncertainty_deg || 1;
+      const r0 = Math.max(0, c.observed_range_m - (c.range_uncertainty_m || 0));
+      const r1 = c.observed_range_m + (c.range_uncertainty_m || 0);
+      const quad = [
+        destination(pose.lat_deg, pose.lon_deg, br - db, r0),
+        destination(pose.lat_deg, pose.lon_deg, br + db, r0),
+        destination(pose.lat_deg, pose.lon_deg, br + db, r1),
+        destination(pose.lat_deg, pose.lon_deg, br - db, r1),
+      ];
+      L.polygon(quad, { color: "#ffd08a", weight: sel ? 3 : 2, fillColor: colour,
+        fillOpacity: sel ? .35 : .18 })
+        .addTo(LAYER)
+        .bindTooltip(`OBSERVED ${c.contact_id} · brg ${fmt(br, 1)}°T ±${fmt(db, 1)}° · `
+          + `rng ${fmt(c.observed_range_m / 1852, 2)} NM ±${fmt((c.range_uncertainty_m || 0) / 1852, 2)}`)
+        .on("click", () => select(rec.record_id));
+      obsPt = destination(pose.lat_deg, pose.lon_deg, br, c.observed_range_m);
+      pts.push(obsPt);
+    }
+
+    /* The claim-to-observation tie. On a SPOOF this line IS the finding, drawn. */
+    if (claimPt && obsPt) {
+      L.polyline([claimPt, obsPt], { color: colour, weight: sel ? 4 : 2,
+        dashArray: label === "SPOOF" ? null : "5 6", opacity: .95 }).addTo(LAYER);
+    }
+  }
+
+  if (!fitted && pts.length > 1) { MAP.fitBounds(L.latLngBounds(pts).pad(0.12)); fitted = true; }
+}
+</script>
+
+<script>
+"use strict";
+/* ===========================================================================
+   7. PANE 3 — PRIORITY QUEUE.  Criterion 2.
+   =========================================================================== */
+function badge(label, solid) {
+  const b = el("span", "badge v-" + label + (solid ? " solid" : ""));
+  if (solid) b.appendChild(el("span", null, label)); else b.textContent = label;
+  return b;
+}
+
+function renderQueue() {
+  const list = $("queue"), rows = ranked();
+  $("queueEmpty").style.display = rows.length ? "none" : "";
+
+  /* FLIP: measure where every row is NOW, rebuild, then animate each row from its old
+     position to its new one. The judge must SEE the queue re-order at the moment the
+     verdict lands — a list that silently swaps two entries has not communicated the
+     thing criterion 2 is being judged on. */
+  const before = new Map();
+  for (const li of list.children) before.set(li.dataset.rid, li.getBoundingClientRect().top);
+
+  list.replaceChildren();
+  for (const rec of rows) {
+    const p = rec.priority, v = rec.verdict, tf = topFactor(p);
+    const id = renderIdent(rec.identity_claimed?.claimed_mmsi);
+    if (!id.safe) raiseIdAlarm(rec.identity_claimed?.claimed_mmsi);
+
+    const li = el("li", "row" + (p.rank === 1 ? " top" : ""));
+    li.dataset.rid = rec.record_id;
+    li.tabIndex = 0;
+    li.setAttribute("role", "option");
+    li.setAttribute("aria-selected", S.selected === rec.record_id ? "true" : "false");
+
+    li.appendChild(el("div", "rank", String(p.rank)));
+
+    const ident = el("div", "ident");
+    ident.appendChild(el("span", "mmsi", id.text));
+    if (rec.ais_track?.claimed_name)
+      ident.appendChild(el("span", "nm", renderIdent(rec.ais_track.claimed_mmsi).safe
+        ? rec.ais_track.claimed_name : "—"));
+    ident.appendChild(badge(v.label, true));
+    if (isInjected(rec))
+      ident.appendChild(el("span", "badge inj", "injected · " + injectedScenario(rec)));
+    if (v.defer_to_human) ident.appendChild(el("span", "badge defer", "defer to human"));
+    if (p.scarce_asset_recommended) ident.appendChild(el("span", "badge rec", "send the boat"));
+    li.appendChild(ident);
+
+    const why = el("div", "why");
+    why.innerHTML = "ranked on <b>" + tf.text + "</b> — "
+      + Math.round(tf.share * 100) + "% of the score"
+      + (v.spoof_subtype ? " · <b>" + v.spoof_subtype + "</b> discrepancy" : "");
+    li.appendChild(why);
+
+    const right = el("div", "rightcol");
+    const conf = el("div", "conf v-" + v.label);
+    const track = el("div", "track"), fill = el("div", "fill");
+    fill.style.width = Math.round((v.confidence || 0) * 100) + "%";
+    track.appendChild(fill);
+    conf.appendChild(el("span", "num", pct(v.confidence)));
+    conf.appendChild(track);
+    right.appendChild(conf);
+    right.appendChild(el("span", "hint", "priority " + fmt(p.score, 2)));
+    li.appendChild(right);
+
+    li.addEventListener("click", () => select(rec.record_id));
+    li.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); select(rec.record_id); }
+    });
+    list.appendChild(li);
+  }
+
+  requestAnimationFrame(() => {
+    for (const li of list.children) {
+      const rid = li.dataset.rid, was = before.get(rid);
+      const rec = S.records.get(rid);
+      const rankChanged = S.prevRank.has(rid) && S.prevRank.get(rid) !== rec.priority.rank;
+      if (was !== undefined) {
+        const dy = was - li.getBoundingClientRect().top;
+        if (Math.abs(dy) > 1) {
+          li.style.transform = `translateY(${dy}px)`;
+          requestAnimationFrame(() => {
+            li.classList.add("moving");
+            li.style.transform = "";
+            setTimeout(() => li.classList.remove("moving"), 620);
+          });
+        }
+      }
+      if (rankChanged || was === undefined) li.classList.add("changed");
+      S.prevRank.set(rid, rec.priority.rank);
+    }
+  });
+}
+
+function select(rid) {
+  S.selected = rid;
+  rememberSelection(rid);
+  for (const li of $("queue").children)
+    li.setAttribute("aria-selected", li.dataset.rid === rid ? "true" : "false");
+  renderEvidence(); renderMap(); renderSensor();
+}
+
+/* ===========================================================================
+   8. PANE 4 — EVIDENCE.  Criterion 4.
+   =========================================================================== */
+const WALL_ROWS = [
+  { dim: "class",    label: "class",    c: t => t?.claimed_ship_type, o: c => c?.observed_class },
+  { dim: "length",   label: "length",   unit: "m",
+    c: t => t?.claimed_length_m, o: c => c?.observed_length_m },
+  { dim: "heading",  label: "heading",  unit: "°T",
+    c: t => t?.claimed_heading_deg_true, o: c => c?.observed_heading_deg_true },
+  { dim: "cog",      label: "course",   unit: "°T",
+    c: t => t?.claimed_cog_deg_true, o: () => null },
+  { dim: "speed",    label: "speed",    unit: "kn",
+    c: t => t?.claimed_sog_kn,
+    o: c => (c?.observed_speed_ms === null || c?.observed_speed_ms === undefined)
+            ? null : c.observed_speed_ms * MS_TO_KN },
+];
+
+function renderEvidence() {
+  const rec = S.records.get(S.selected);
+  const box = $("ev");
+  if (!rec) { box.hidden = true; $("evEmpty").style.display = ""; return; }
+  $("evEmpty").style.display = "none";
+  box.hidden = false;
+  box.replaceChildren();
+
+  const v = rec.verdict, p = rec.priority, t = rec.ais_track, c = rec.eo_contact;
+  const id = renderIdent(rec.identity_claimed?.claimed_mmsi);
+  if (!id.safe) raiseIdAlarm(rec.identity_claimed?.claimed_mmsi);
+
+  /* ---- head ---- */
+  const head = el("div", "evhead");
+  head.appendChild(el("span", "mmsi", id.text));
+  head.appendChild(badge(v.label, true));
+  if (isInjected(rec))
+    head.appendChild(el("span", "badge inj", "injected · " + injectedScenario(rec)));
+  if (v.spoof_subtype) head.appendChild(el("span", "badge v-SPOOF", v.spoof_subtype + " spoof"));
+  if (v.defer_to_human) head.appendChild(el("span", "badge defer", "defer to human"));
+  const conf = el("div", "conf v-" + v.label);
+  conf.appendChild(el("span", "num", pct(v.confidence)));
+  const tr = el("div", "track"), fl = el("div", "fill");
+  fl.style.width = Math.round((v.confidence || 0) * 100) + "%"; tr.appendChild(fl);
+  conf.appendChild(tr);
+  head.appendChild(conf);
+  box.appendChild(head);
+
+  const stamp = el("div", "hint");
+  stamp.style.marginTop = "2px";
+  stamp.textContent = [
+    "decided " + (v.decided_at_utc || "").replace("T", " ").replace(/\..*/, "") + " UTC",
+    rec.bearing_deg_true != null ? "bearing " + fmt(rec.bearing_deg_true, 1) + "°T" : null,
+    rec.range_nm != null ? "range " + fmt(rec.range_nm, 2) + " NM" : null,
+    "ruleset " + (v.ruleset_version || "—"),
+    rec.frame_refs?.length ? "frame " + rec.frame_refs[0] : null,
+  ].filter(Boolean).join("  ·  ");
+  box.appendChild(stamp);
+
+  /* ---- the wall: claimed beside observed ---- */
+  const wall = el("div", "card");
+  wall.appendChild(el("h3", null, "Claimed vs observed"));
+  const tbl = el("table", "wall");
+  const thead = el("thead"), htr = el("tr");
+  htr.appendChild(el("th", null, ""));
+  htr.appendChild(el("th", "c", "AIS claims"));
+  htr.appendChild(el("th", "o", "camera observes"));
+  thead.appendChild(htr); tbl.appendChild(thead);
+  const tb = el("tbody");
+  const mmByDim = new Map((rec.mismatches || []).map(m => [m.dimension, m]));
+
+  for (const row of WALL_ROWS) {
+    const cv = row.c(t), ov = row.o(c);
+    if (cv === null && ov === null || cv === undefined && ov === undefined) continue;
+    const m = mmByDim.get(row.dim);
+    const trr = el("tr", m ? "mm" : null);
+    trr.appendChild(el("td", "dim", row.label));
+    const show = (x) => (x === null || x === undefined) ? "not broadcast"
+      : (typeof x === "number" ? fmt(x, row.unit === "m" ? 1 : 1) + " " + (row.unit || "") : String(x));
+    trr.appendChild(el("td", "c", show(cv)));
+    const otd = el("td", "o", show(ov));
+    /* A CATEGORICAL DIFFERENCE THAT WAS NOT RAISED MUST SAY SO.
+       Showing claimed "fishing" beside observed "tug" with no annotation reads as the
+       tool having missed it. It did not — the consistency layer declined to raise it,
+       and that is a finding in its own right. Restricted to categorical dimensions on
+       purpose: for a numeric field a small difference is expected and normal, so
+       flagging every one of those would be noise. Class either matches or it does not.
+       The wording states only what is observable and does not guess at the reason. */
+    if (!m && row.dim === "class" && cv && ov && String(cv) !== String(ov)) {
+      const note = el("span", "sig");
+      note.style.color = "var(--muted)";
+      note.textContent = "values differ · the consistency layer did not raise this as a "
+        + "mismatch — a class disagreement alone cannot convict";
+      otd.appendChild(note);
+    }
+    if (m) {
+      const s = el("span", "sig");
+      s.textContent = `${fmt(m.significance, 1)} sigma vs tolerance `
+        + `${fmt(m.tolerance, 1)}${m.unit && m.unit !== "none" ? " " + m.unit : ""} · ${m.severity}`;
+      if (m.explained_by_staleness) {
+        const e = el("span", "expl", "  · explained by stale AIS — not evidence");
+        s.appendChild(e);
+      }
+      otd.appendChild(s);
+    }
+    trr.appendChild(otd);
+    tb.appendChild(trr);
+  }
+  if (!t) {
+    const trr = el("tr");
+    trr.appendChild(el("td", "dim", "identity"));
+    const td = el("td", "c", "NO AIS CLAIM — nothing was broadcast from here");
+    td.colSpan = 2; trr.appendChild(td); tb.appendChild(trr);
+  }
+  tbl.appendChild(tb); wall.appendChild(tbl);
+  box.appendChild(wall);
+
+  /* ---- priority breakdown ---- */
+  if (p) {
+    const card = el("div", "card");
+    const h = el("h3", null, "Why it is ranked " + p.rank);
+    card.appendChild(h);
+    const bars = el("div", "bars");
+    const tf = topFactor(p);
+    for (const r of tf.rows) {
+      const b = el("div", "bar");
+      b.appendChild(el("div", "nm", r.k.replace(/_/g, " ")));
+      const tk = el("div", "t"), f = el("div", "f");
+      f.style.width = Math.round((p.score > 0 ? r.c / p.score : 0) * 100) + "%";
+      tk.appendChild(f); b.appendChild(tk);
+      b.appendChild(el("div", "v", fmt(r.sc, 2) + " x " + fmt(r.wt, 2) + " = " + fmt(r.c, 3)));
+      bars.appendChild(b);
+    }
+    /* THE INVARIANT, CHECKED ON SCREEN — not merely printed.
+       prioritizer.breakdown_sums_to_score() asserts the published components add up to
+       the published score, and its docstring gives the reason: "an operator who adds up
+       the column and gets a different total has found a reason to stop trusting the
+       whole tool." A console that prints a total it has not verified is doing the
+       arithmetic FOR that operator and getting it wrong silently.
+       This check found a real defect on first run — see 99_scratch/handoff_E.md §6. */
+    const summed = tf.rows.reduce((acc, r) => acc + r.c, 0);
+    const drift = Math.abs(summed - p.score);
+    const tot = el("div", "bar total");
+    tot.appendChild(el("div", "nm", "priority score"));
+    tot.appendChild(el("div", null, ""));
+    tot.appendChild(el("div", "v", fmt(p.score, 3)));
+    bars.appendChild(tot);
+    card.appendChild(bars);
+    if (drift > 5e-4) {
+      const w = el("div", "attrib");
+      w.style.color = "var(--dark)";
+      w.style.fontWeight = "800";
+      w.textContent = `BREAKDOWN DOES NOT SUM: the factors above total `
+        + `${fmt(summed, 3)}, the published score is ${fmt(p.score, 3)} `
+        + `(difference ${fmt(drift, 3)}). The ranking is still the pipeline's; the `
+        + `published explanation of it is incomplete. Do not defend this number on `
+        + `stage until prioritizer.breakdown_sums_to_score() passes.`;
+      card.appendChild(w);
+    }
+
+    const facts = [];
+    if (p.nearest_infrastructure_id)
+      facts.push(`nearest protected asset ${p.nearest_infrastructure_id} at ${fmt(p.nearest_infrastructure_m, 0)} m`);
+    if (p.time_to_intercept_min != null)
+      facts.push(`patrol asset ${fmt(p.nearest_asset_km, 1)} km away, ${fmt(p.time_to_intercept_min, 0)} min to intercept`);
+    facts.push(p.scarce_asset_recommended
+      ? "above the tool's recommendation threshold" : "below the recommendation threshold");
+    card.appendChild(el("div", "attrib", facts.join("  ·  ")));
+    box.appendChild(card);
+  }
+
+  /* ---- rationale, with attribution ---- */
+  const rc = el("div", "card");
+  const rh = el("h3", null, "Rationale");
+  rh.appendChild(el("span", "hint", "the verdict above is deterministic — this text is not the verdict"));
+  rc.appendChild(rh);
+  rc.appendChild(el("div", "rat", rec.rationale_text || "No rationale was generated."));
+  /* ATTRIBUTION IS NOT DECORATION. CLAUDE.md: the LLM writes the RATIONALE, never the
+     VERDICT. Naming the writer on screen is how a judge can see that separation held —
+     "deterministic-template (no model)" means the whole case file was produced with no
+     model in the loop at all. */
+  rc.appendChild(el("div", "attrib", "written by: " + (rec.rationale_model || "unattributed")
+    + "  ·  pipeline " + (rec.pipeline_version || "—")));
+  box.appendChild(rc);
+
+  /* ---- honest limits + what would change ---- */
+  const lc = el("div", "card");
+  lc.appendChild(el("h3", null, "What would change this answer"));
+  const ul = el("ul", "lims");
+  if (isInjected(rec)) {
+    /* STATED, NOT HIDDEN — and stated FIRST, above the real limitations. A scripted
+       contact that reads like a real detection is the single most misleading thing
+       this console could put in front of a judge. */
+    const li = el("li", null,
+      "THIS CONTACT WAS INJECTED by the operator as a scripted demonstration "
+      + `(scenario "${injectedScenario(rec)}"). No camera observed it. Its bearing, `
+      + "range and their uncertainties are the harness's; the attributes under "
+      + "comparison were set deliberately. The label travels in frame_ref, so it is in "
+      + "the exported case file too.");
+    li.style.color = "var(--unknown)";
+    li.style.fontWeight = "700";
+    ul.appendChild(li);
+  }
+  for (const line of whatWouldChange(rec)) ul.appendChild(el("li", null, line));
+  for (const line of (rec.limitations || [])) ul.appendChild(el("li", null, line));
+  if (!ul.children.length) ul.appendChild(el("li", null, "No limitations were recorded."));
+  lc.appendChild(ul);
+  box.appendChild(lc);
+
+  /* ---- operator actions ---- */
+  const ac = el("div", "card");
+  ac.id = "stickyActions";
+  ac.appendChild(el("h3", null, "Operator decision — recorded, never executed"));
+  const bar = el("div", null); bar.id = "actions";
+  const mk = (label, action, cls) => {
+    const b = el("button", "act" + (cls ? " " + cls : ""), label);
+    b.addEventListener("click", () => postAction(action, rec));
+    return b;
+  };
+  bar.appendChild(mk("Dispatch patrol", "DISPATCH", "primary"));
+  bar.appendChild(mk("Watch", "WATCH"));
+  bar.appendChild(mk("Dismiss", "DISMISS", "danger"));
+  bar.appendChild(mk("Export evidence", "EXPORT"));
+  ac.appendChild(bar);
+  const ack = el("div", null, ""); ack.id = "ack"; ac.appendChild(ack);
+  ac.appendChild(el("div", "attrib",
+    "This tool ranks and evidences. It has no channel to task anything and no field to "
+    + "record an outcome. A human decides, and this is the line that records who."));
+  box.appendChild(ac);
+}
+</script>
+
+<script>
+"use strict";
+/* ===========================================================================
+   9. OPERATOR ACTIONS
+   =========================================================================== */
+function showAck(ev) {
+  const n = $("ack"); if (!n) return;
+  const a = ev.action || {};
+  n.className = ev.accepted ? "" : "bad";
+  n.textContent = (ev.accepted ? "RECORDED · " : "NOT RECORDED · ")
+    + a.action + " by " + a.operator_id + " on " + a.contact_id
+    + (ev.detail ? " — " + ev.detail : "");
+}
+
+async function postAction(action, rec) {
+  const operator = ($("opid").value || "").trim();
+  if (!operator) {
+    /* An unattributed dispatch order is not a decision record, it is an anonymous
+       one — contracts.OperatorAction.operator_id says so. Refuse locally rather than
+       send something the audit trail cannot stand behind. */
+    const n = $("ack"); n.className = "bad";
+    n.textContent = "NOT SENT — enter an operator id first. An unattributed decision "
+      + "cannot go in the audit trail.";
+    $("opid").focus();
+    return;
+  }
+  /* contact_id must be traceable back to an EoContact OR an Association. For an
+     unobserved claim there is no contact, so the association id is sent — which is
+     what contracts.py permits, and it keeps the action tied to the evidence that
+     prompted it instead of to nothing. */
+  const contact_id = rec.eo_contact?.contact_id || rec.verdict?.association_id || rec.record_id;
+  const body = {
+    action, contact_id, operator_id: operator,
+    action_time_utc: new Date().toISOString().replace(/\.\d+Z$/, "Z"),
+    note: "console rank " + (rec.priority?.rank ?? "?") + " · " + rec.verdict.label
+          + " · conf " + fmt(rec.verdict.confidence, 2),
+  };
+  const n = $("ack"); n.className = ""; n.textContent = "sending…";
+  try {
+    const r = await fetch("/action", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const ack = await r.json();
+    /* The ack also arrives on the WebSocket for every other console. Rendering the
+       HTTP reply immediately means the operator sees confirmation now rather than
+       after a round trip — and the two agree because the server sends one object. */
+    showAck(ack);
+  } catch (e) {
+    n.className = "bad";
+    n.textContent = "NOT RECORDED — " + e + ". The decision did NOT reach the audit trail.";
+    return;
+  }
+  /* EXPORT is the one action with an artefact. The evidence route is pseudonymised by
+     default and refuses real identities unless the server was started for it. */
+  if (action === "EXPORT") window.open("/evidence/" + encodeURIComponent(rec.record_id), "_blank");
+}
+
+/* ===========================================================================
+   10. RENDER + BOOT
+   =========================================================================== */
+function renderAll() { renderSensor(); renderQueue(); renderMap(); renderEvidence(); }
+
+function tickClock() {
+  $("tClock").textContent = new Date().toISOString().slice(11, 19);
+}
+
+async function boot() {
+  try { localStorage.getItem("op") && ($("opid").value = localStorage.getItem("op")); } catch {}
+  $("opid").addEventListener("change", () => {
+    try { localStorage.setItem("op", $("opid").value); } catch {}
+  });
+
+  setInterval(tickClock, 1000); tickClock();
+  setInterval(renderSensor, 5000);   /* re-render the "seen N s ago" age only */
+  /* The banner counts down a retry and counts up the age of the picture. Both are
+     wall-clock facts, so they need a wall-clock tick — without it "retry in 3 s"
+     freezes at 3 and the page is lying about the one thing it is there to be honest
+     about. Cheap: it touches four text nodes. */
+  setInterval(renderLink, 1000);
+
+  /* The stage first: pose, infrastructure, the asset and the caveat are properties of
+     the SCENE, not of the picture, and ConsoleState deliberately does not carry them.
+     Everything live comes from the socket after this. */
+  try { applyState(await fetchState()); }
+  catch (e) { setTransport("down", String(e)); }
+
+  initMap();
+  initVideo();
+  connect();
+
+  /* Keyboard: the demo laptop may be on a lectern with no mouse to hand. */
+  document.addEventListener("keydown", (e) => {
+    if (e.target.tagName === "INPUT") return;
+    const rows = ranked();
+    if (!rows.length) return;
+    const i = rows.findIndex(r => r.record_id === S.selected);
+    if (e.key === "ArrowDown") { e.preventDefault(); select(rows[Math.min(rows.length - 1, i + 1)].record_id); }
+    if (e.key === "ArrowUp")   { e.preventDefault(); select(rows[Math.max(0, i - 1)].record_id); }
+    if (e.key >= "1" && e.key <= "9") { const r = rows[+e.key - 1]; if (r) select(r.record_id); }
+  });
+}
+
+boot();
+</script>
+</body>
+</html>

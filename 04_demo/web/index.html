@@ -57,6 +57,11 @@
 <header>
   <h1>Maritime Approaches</h1>
   <span class="mode" id="mode">—</span>
+  <!-- LANE F: the live source, shown AT ALL TIMES. It rides on /api/state so it
+       cannot go stale independently of the picture it describes. -->
+  <span class="mode" id="source" title="which sensor is feeding the picture">SOURCE —</span>
+  <span id="srcbtns" style="font-size:11px"></span>
+  <span id="srcnote" style="color:var(--dim);font-size:11px"></span>
   <span id="counts" style="color:var(--dim);font-size:11px"></span>
   <span class="caveat" id="caveat"></span>
 </header>
@@ -108,12 +113,75 @@ function render(){
   if(!DATA) return;
   const c=DATA.counts||{};
   document.getElementById('mode').textContent=(DATA.mode||'replay').toUpperCase();
+  renderSource();
   document.getElementById('counts').textContent =
     `${c.tracks} claims · ${c.contacts} contacts · ${c.matched} matched · `+
     `${c.dark_candidates} unclaimed · ${c.unobserved_claims} unobserved`;
   document.getElementById('caveat').textContent = DATA.caveat||'';
   drawPlan(); drawList(); drawScoring();
   if(SEL) drawEvidence(SEL);
+}
+
+// ---------------------------------------------------------------- LANE F: source
+// The badge is red whenever the live source is not the one the operator last chose to
+// be live AND that source has stopped posting. Colour is not decoration here: an
+// operator glancing at the screen must be able to tell "this picture is coming from a
+// sensor that is still alive" from "this picture is the last thing a dead sensor said".
+function renderSource(){
+  const s = DATA.source || {};
+  const el = document.getElementById('source');
+  el.textContent = 'SOURCE ' + (s.active_source || '—');
+  const dead = (DATA.nodes||[]).some(n => n.kind === s.active_kind && n.online === false);
+  el.style.borderColor = dead ? '#c2453f' : 'var(--accent)';
+  el.style.color       = dead ? '#c2453f' : '';
+
+  const btns = document.getElementById('srcbtns');
+  const want = (s.available_sources || ['EDGE_PI','MAC_CAMERA','RECORDED']).join(',');
+  if (btns.dataset.built !== want){
+    btns.dataset.built = want; btns.innerHTML = '';
+    for (const src of (s.available_sources || [])){
+      const b = document.createElement('button');
+      b.textContent = src; b.style.cssText =
+        'margin-left:4px;font:inherit;font-size:11px;cursor:pointer;'+
+        'background:#1b2129;color:#cdd6df;border:1px solid #38414c;padding:2px 6px';
+      b.onclick = () => switchSource(src);
+      btns.appendChild(b);
+    }
+  }
+  for (const b of btns.children){
+    const on = (b.textContent === s.active_source);
+    b.style.borderColor = on ? 'var(--accent)' : '#38414c';
+    b.style.color = on ? '#e8eef4' : '#8b97a3';
+  }
+
+  // Nodes that are posting but not selected. "Receiving but not using" is a different
+  // sentence from "offline", and an operator who cannot tell them apart will go and
+  // debug a sensor that is working.
+  const dem = s.demoted_nodes || {};
+  const keys = Object.keys(dem);
+  document.getElementById('srcnote').textContent =
+    keys.length ? ('· ' + keys.map(k => k + ': ' + dem[k]).join('  ·  ')) : '';
+}
+
+async function switchSource(src){
+  const t0 = performance.now();
+  const note = document.getElementById('srcnote');
+  note.textContent = '· switching to ' + src + '…';
+  try{
+    const r = await fetch('/source', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({source: src, operator_id: 'console',
+                            reason: 'operator switched from the console'})});
+    const j = await r.json();
+    const wall = (performance.now() - t0).toFixed(0);
+    // The MEASURED round trip is shown, not a spinner. The operator is entitled to
+    // know how long the tool actually took, and the number goes in the writeup.
+    note.textContent = '· ' + src + ' live in ' + wall + ' ms (server '
+      + (j.total_ms ?? '?') + ' ms, ' + (j.buffered_contacts ?? 0) + ' buffered, '
+      + 'records ' + (j.records_before ?? '?') + '→' + (j.records_after ?? '?') + ')';
+    console.log('[source] switch', src, j);
+    await poll();
+  }catch(e){ note.textContent = '· switch FAILED: ' + e; }
 }
 
 function drawPlan(){
