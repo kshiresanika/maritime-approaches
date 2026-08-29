@@ -95,11 +95,11 @@ import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator, Sequence
+from typing import Any, Iterator, Literal, Sequence
 
 import pandas as pd
 
-from contracts import AisTrack, VesselClass
+from contracts import AisTrack, Severity, VesselClass
 
 # --------------------------------------------------------------------------------
 # Constants settled FROM THE FILE and FROM pyais, not from documentation.
@@ -849,3 +849,611 @@ class NmeaLiveSource(AisSource):
             claimed_nav_status=getattr(status, "name", None) if status is not None else None,
             mobile_class="Class B" if msg_type in self.CLASS_B_MESSAGE_TYPES else "Class A",
         )
+
+
+# ================================================================================
+# PLAUSIBILITY — does the claimed track contradict itself?
+#
+# WHY THIS LIVES IN ais_ingest AND NOT IN ais_trajectory
+# It is a per-report check with one report of memory, so it works on the LIVE path
+# too: T2 can flag a bad position fix as it arrives, before anything downstream sees
+# it. ais_trajectory works on whole trajectories and cannot do that.
+#
+# THE DEPENDENCY RULE IS PRESERVED. shapely, geopandas and pyproj are imported
+# LAZILY, inside the functions that need them — the same pattern NmeaLiveSource uses
+# for pyais. Importing this module and reading a CSV still requires nothing but
+# pandas. A teammate with a broken geopandas install can read AIS, run the speed and
+# teleport checks, and only loses the land check.
+#
+# WHAT THIS IS NOT: it is not a spoof detector. Every finding here is a CLAIM
+# CONTRADICTING ITSELF, and by far the most common cause of that is a cheap GPS on a
+# small Class B craft, not deception. The output is a data-quality signal that lane C
+# may promote to SpoofSubtype="kinematic" if — and only if — other evidence agrees.
+# Saying otherwise about a real hull is defamatory.
+#
+# --------------------------------------------------------------------------------
+# THE MEASUREMENT THAT SET THE DEFAULTS, and why the naive version is 36x wrong
+#
+# Fehmarn slice, 431,430 consecutive report pairs. Implied speed = geodesic distance
+# between consecutive claimed positions, over the time between them.
+#
+#   implied speed > 50 kn, no other condition   ->   705 pairs, 146 vessels
+#   ...of which 564 (80%) are over dt <= 2 s, with a MEDIAN JUMP OF 57 METRES.
+#
+# 57 m in 1 second is 111 knots. It is also the ordinary scatter of a consumer GPS
+# fix. At 1 Hz reporting, position NOISE dominates position CHANGE, so a naive
+# implied-speed check is measuring the receiver, not the vessel. Requiring a minimum
+# sampling interval collapses the count:
+#
+#   min dt      pairs over 50 kn      vessels
+#     0 s               705             146
+#     2 s               345             106
+#     5 s                50              34
+#    10 s                19              16      <- the shipped default
+#    30 s                 6               6
+#
+# 705 -> 19 is a factor of 37. Ship the naive version and 96% of what the operator
+# sees is receiver noise, which is how a decision-support tool trains its user to
+# ignore it. The defaults below are chosen from that table, and the thresholds travel
+# on every finding so the number can never be quoted without them.
+#
+# THE ZERO-INTERVAL TRAP, measured: 956 consecutive pairs share a timestamp exactly.
+# ais_ingest deduplicates on (Timestamp, MMSI, Latitude, Longitude), so two
+# basestations that decoded the SAME transmission to slightly different coordinates
+# both survive — 583 of the 956 differ by under 5 metres, which is rounding.
+# dt = 0 makes implied speed infinite, so unhandled these are 956 phantom teleports,
+# AND a ZeroDivisionError waiting for whichever consumer divides first.
+#
+# But 21 of them differ by MORE THAN 100 METRES in the same second, and that is not
+# rounding — a hull cannot be in two places at once. The most likely explanation is
+# the one lane A already flagged as a known limitation: TWO VESSELS SHARING ONE MMSI,
+# which is precisely the identity spoof criterion 3 calls the discriminator. So
+# zero-interval pairs are not discarded; they are split at a distance threshold and
+# the large ones are reported as their own kind.
+# ================================================================================
+
+#: The `dimension` value these findings carry. Requested as an addition to
+#: `contracts.MismatchDimension` in 99_scratch/requests.md — until ARCH lands it, the
+#: closed Literal in contracts.py cannot hold this value, which is why the record
+#: below is a local mirror rather than a real `contracts.Mismatch`.
+POSITION_IMPLAUSIBLE = "position_implausible"
+
+ImplausibilityKind = Literal[
+    "impossible_speed",     # implied speed exceeds any plausible hull speed
+    "teleport",             # impossible speed AND a large absolute jump
+    "zero_interval_jump",   # two positions in the same second, far apart
+    "crosses_land",         # the segment between two reports passes over land
+]
+
+#: No surface vessel in the Fehmarn slice claims more than 47.0 kn (measured), so 50
+#: is above every declared speed in the data while still far below the ~110 kn that
+#: 1 Hz GPS scatter manufactures.
+DEFAULT_MAX_SPEED_KN = 50.0
+#: Below this sampling interval, position noise dominates position change. See the
+#: table above — this single parameter is the difference between 705 findings and 19.
+DEFAULT_MIN_INTERVAL_S = 10.0
+#: A jump smaller than this is within GPS scatter regardless of interval.
+DEFAULT_MIN_JUMP_M = 100.0
+#: An impossible speed over a jump this large is a teleport rather than a bad fix.
+DEFAULT_TELEPORT_JUMP_M = 1000.0
+#: Same-timestamp pairs further apart than this cannot be one hull. 583 of 956 such
+#: pairs differ by under 5 m (basestation rounding); the tail is the interesting part.
+DEFAULT_ZERO_INTERVAL_JUMP_M = 100.0
+#: The coastline is 1:100,000, so its edge is good to roughly a hundred metres and a
+#: vessel alongside a quay can fall inside the land polygon. Land is ERODED by this
+#: much before testing, so only unambiguously overland tracks fire.
+DEFAULT_LAND_EROSION_M = 250.0
+
+PLAUSIBILITY_RULESET_VERSION = "lane-a-plausibility-1.0"
+
+
+@dataclass(frozen=True)
+class PlausibilityMismatch:
+    """
+    One way in which a claimed track contradicts itself.
+
+    LOCAL MIRROR of the `contracts.Mismatch` extension requested in
+    `99_scratch/requests.md`. Field names are the requested names so the swap is an
+    import change.
+
+    THE TWO FIELDS THAT FORCED A MIRROR RATHER THAN A REAL `Mismatch`:
+      * `association_id` is None. `contracts.Mismatch` requires one, but there is no
+        association here — nothing was observed, so nothing was paired. A synthetic
+        id would put a fabricated association into an evidence record.
+      * there is no `observation_confidence`, because nothing observed this. The
+        comparison is claim against claim.
+
+    `comparison="claimed_vs_implied"` is the discriminator that keeps the wall
+    standing. An implied value is computed from consecutive CLAIMED POSITIONS: it is
+    not an observation, and a consumer that reads it as one would weight a verdict
+    using an EO uncertainty that does not exist.
+    """
+
+    mismatch_id: str
+    track_id: str
+    claimed_mmsi: str
+    kind: ImplausibilityKind
+
+    dimension: str = POSITION_IMPLAUSIBLE
+    comparison: str = "claimed_vs_implied"
+    association_id: None = None
+
+    claimed_value: float | str = 0.0
+    claimed_field: str = ""
+    implied_value: float | str = 0.0
+    implied_field: str = ""
+    unit: str = "none"
+
+    delta: float | None = None
+    tolerance: float | None = None
+    significance: float = 0.0
+    severity: Severity = "minor"
+
+    t_start_utc: datetime | None = None
+    t_end_utc: datetime | None = None
+    dt_s: float | None = None
+    from_lat_deg: float | None = None
+    from_lon_deg: float | None = None
+    to_lat_deg: float | None = None
+    to_lon_deg: float | None = None
+    distance_m: float | None = None
+
+    #: True when the sampling interval or jump size is small enough that receiver
+    #: noise is a sufficient explanation. Never scored as a finding.
+    explained_by_sampling_noise: bool = False
+    #: The thresholds this finding was produced under. A count without its thresholds
+    #: is not a measurement — same reasoning as `Verdict.ruleset_version`.
+    detector: dict[str, Any] = field(default_factory=dict)
+    ruleset_version: str = PLAUSIBILITY_RULESET_VERSION
+
+
+#: Metric CRS for the land check. ETRS89 / UTM 32N covers Denmark and the Fehmarn
+#: Belt; its units are metres, so the erosion buffer means what it says. Web Mercator
+#: would be ~1.7x wrong at 54.6 N — it is a display projection, not a metric one.
+LAND_METRIC_CRS = "EPSG:25832"
+
+
+class LandMask:
+    """
+    Land polygons, for "did this track cross land".
+
+    DATA — EEA coastline for analysis (polygon), version 3.0, March 2017.
+      * Licence: **CC-BY 4.0**, copyright holder European Environment Agency, "no
+        limitations to public access". Attribution is required and is satisfied by
+        citing the EEA on any slide that shows a land-crossing finding.
+      * Scale: 1:100,000 minimum mapping unit. Native CRS **EPSG:3035**
+        (ETRS89-extended / LAEA Europe) — NOT 4326, so it must be reprojected.
+      * Lineage: a hybrid of EUHYDRO and GSHHG, cut at EUDEM altitude 0.
+      * Download: https://sdi.eea.europa.eu/data/9faa6ea1-372a-4826-a3c7-fb5b05e31c52
+
+    WHY NOT A COARSER COASTLINE, stated because the obvious shortcut is actively
+    harmful: geopandas 1.1.4 removed its bundled Natural Earth dataset, and the only
+    shapefile left on disk is a 1:110,000,000 fixture inside pyogrio's test folder.
+    Its coastline error is kilometres. The Fehmarn Belt is about 18 km wide. Using it
+    would report that every vessel near Rødbyhavn and Puttgarden had sailed overland
+    — false positives aimed precisely at the vessels closest to the infrastructure
+    this tool exists to protect. A wrong coastline is worse than no coastline,
+    because no coastline is visibly missing and a wrong one is not.
+
+    WHY LAND IS ERODED BEFORE TESTING: at 1:100,000 the shoreline is good to roughly
+    a hundred metres, and harbours, quays and the Fehmarnbelt tunnel works are inside
+    that error. A vessel moored alongside a pier legitimately sits within the land
+    polygon. Eroding land inward by `erosion_m` means only unambiguously overland
+    tracks fire, at the cost of missing a genuine short cut across a headland. That
+    trade is deliberate: this is decision support, and a false accusation costs more
+    than a missed one.
+    """
+
+    def __init__(self, path: str | Path, *,
+                 erosion_m: float = DEFAULT_LAND_EROSION_M,
+                 bbox: tuple[float, float, float, float] | None = None) -> None:
+        # Lazy: geopandas and shapely are NOT dependencies of reading AIS.
+        import geopandas as gpd
+        from shapely import STRtree
+
+        self.path = Path(path)
+        self.erosion_m = erosion_m
+        if not self.path.exists():
+            raise FileNotFoundError(
+                f"coastline not found: {self.path}. Land check cannot run. See the "
+                "download URL in LandMask's docstring.")
+
+        land = gpd.read_file(self.path)
+        if land.crs is None:
+            raise ValueError(
+                f"{self.path.name} has no CRS. Refusing to guess — an unprojected "
+                "shapefile silently treated as degrees puts the coastline in the "
+                "wrong ocean.")
+        # ETRS89 / UTM 32N: metres over Denmark, so the erosion buffer is metres.
+        land = land.to_crs(LAND_METRIC_CRS)
+
+        if bbox is not None:
+            lat_min, lat_max, lon_min, lon_max = bbox
+            from shapely.geometry import box as _box
+            clip = gpd.GeoSeries(
+                [_box(lon_min, lat_min, lon_max, lat_max)], crs="EPSG:4326"
+            ).to_crs(LAND_METRIC_CRS).iloc[0].buffer(20_000)
+            land = land[land.intersects(clip)]
+
+        eroded = land.geometry.buffer(-erosion_m)
+        self.geometries = [g for g in eroded if g is not None and not g.is_empty]
+        # An STRtree turns "does this 30 m segment hit any land polygon" from a scan
+        # over every polygon in Europe into an indexed lookup. Without it the check
+        # is O(segments x polygons) and will not finish on a day of AIS.
+        self.tree = STRtree(self.geometries)
+        self.n_polygons = len(self.geometries)
+
+        # always_xy=True means transform(lon, lat) -> (x, y). Without it pyproj uses
+        # the CRS's own axis order, which for several EPSG codes is lat-then-lon, and
+        # the coastline silently ends up in the wrong hemisphere.
+        from pyproj import Transformer
+        self._to_metric = Transformer.from_crs(
+            "EPSG:4326", LAND_METRIC_CRS, always_xy=True)
+
+    def crosses(self, lat_a: float, lon_a: float, lat_b: float, lon_b: float) -> bool:
+        """
+        True when the straight segment between two positions passes over land.
+
+        PERFORMANCE, because this is called once per evaluated pair — hundreds of
+        thousands of times on a day of AIS. Building a geopandas GeoSeries per call
+        to reproject two points costs roughly a millisecond, which is minutes of
+        wall clock for one slice. A cached `pyproj.Transformer` built once in
+        __init__ does the same conversion in microseconds. The STRtree then makes the
+        land lookup an indexed query instead of a scan over every polygon in Europe;
+        without both, this check does not finish.
+        """
+        from shapely.geometry import LineString
+
+        xa, ya = self._to_metric.transform(lon_a, lat_a)
+        xb, yb = self._to_metric.transform(lon_b, lat_b)
+        segment = LineString([(xa, ya), (xb, yb)])
+        for idx in self.tree.query(segment):
+            if self.geometries[idx].intersects(segment):
+                return True
+        return False
+
+
+@dataclass
+class PlausibilityStats:
+    """What the checker saw. Counted, so a threshold change is visible as a number."""
+
+    #: Every non-first report. Includes those skipped below the interval floor.
+    pairs_seen: int = 0
+    #: Pairs that cleared the interval floor and had a distance computed. This is the
+    #: population the finding counts are drawn from, and the one INVENTORY.md quotes.
+    pairs_evaluated: int = 0
+    pairs_skipped_first_report: int = 0
+    pairs_below_min_interval: int = 0
+    pairs_below_min_jump: int = 0
+    zero_interval_pairs: int = 0
+    findings_by_kind: dict[str, int] = field(default_factory=dict)
+    land_check_available: bool = False
+    land_check_unavailable_reason: str = "no coastline configured"
+
+    def note(self, kind: str) -> None:
+        self.findings_by_kind[kind] = self.findings_by_kind.get(kind, 0) + 1
+
+    def summary(self) -> str:
+        land = ("available" if self.land_check_available
+                else f"UNAVAILABLE — {self.land_check_unavailable_reason}")
+        lines = [
+            f"pairs seen                   : {self.pairs_seen:,}",
+            f"pairs evaluated              : {self.pairs_evaluated:,}",
+            f"  first report of a vessel   : {self.pairs_skipped_first_report:,}",
+            f"  below min sampling interval: {self.pairs_below_min_interval:,}",
+            f"  below min jump             : {self.pairs_below_min_jump:,}",
+            f"  same-timestamp pairs       : {self.zero_interval_pairs:,}",
+            f"land check                   : {land}",
+            f"findings                     : {self.findings_by_kind or 'none'}",
+        ]
+        return "\n".join(lines)
+
+
+class PlausibilityChecker:
+    """
+    Streaming self-consistency check on a claimed track. One report of memory.
+
+    WHY STREAMING AND NOT BATCH: it holds one anchor report per MMSI, so it works
+    unchanged on `NmeaLiveSource`. T2 can flag a bad position fix as it arrives,
+    before anything downstream has associated on it. A batch trajectory analysis
+    cannot do that, which is why this lives here and not in `ais_trajectory.py`.
+
+    THE ANCHOR RULE, and why it is not "compare consecutive reports".
+    Reports arrive as often as every second, and over one second a consumer GPS's own
+    scatter (tens of metres) exceeds the vessel's actual movement. Comparing
+    consecutive reports therefore measures the receiver. But simply DISCARDING short
+    intervals would mean a vessel reporting at 1 Hz is never checked at all.
+
+    So the anchor is only advanced when a pair is actually evaluated. A report closer
+    than `min_interval_s` to the anchor is skipped WITHOUT moving the anchor, so the
+    next one is compared against a base that is now far enough back. A 1 Hz vessel is
+    checked roughly every ten seconds instead of never.
+
+    Measured on the Fehmarn day: 431,430 pairs, of which 151,998 fall inside the
+    minimum interval and 278,934 are evaluated. Comparing consecutive reports with no
+    interval floor yields 705 "impossible speeds"; 564 of them are over dt <= 2 s with
+    a median jump of 57 m, which is a GPS fix, not a ship. The floor is the difference
+    between an operator seeing 705 alerts that are 96% noise and seeing 41.
+
+    NOT A SPOOF DETECTOR. Every finding is a claim contradicting itself, and the
+    overwhelmingly most likely cause is a cheap transponder — 26 of the 41 findings on
+    the Fehmarn day are on vessels claiming ship type "Sailing", all Class B. Lane C
+    may promote a finding to `SpoofSubtype="kinematic"` only with corroboration.
+    Calling one of these a spoof, about a real hull, would be defamatory.
+    """
+
+    def __init__(
+        self,
+        *,
+        max_speed_kn: float = DEFAULT_MAX_SPEED_KN,
+        min_interval_s: float = DEFAULT_MIN_INTERVAL_S,
+        min_jump_m: float = DEFAULT_MIN_JUMP_M,
+        teleport_jump_m: float = DEFAULT_TELEPORT_JUMP_M,
+        zero_interval_jump_m: float = DEFAULT_ZERO_INTERVAL_JUMP_M,
+        land_mask: LandMask | None = None,
+        land_max_interval_s: float = 60.0,
+    ) -> None:
+        self.max_speed_kn = max_speed_kn
+        self.min_interval_s = min_interval_s
+        self.min_jump_m = min_jump_m
+        self.teleport_jump_m = teleport_jump_m
+        self.zero_interval_jump_m = zero_interval_jump_m
+        self.land_mask = land_mask
+        #: Beyond this interval the straight line between two reports is NOT the path
+        #: the vessel took, so an intersection with land says nothing. The straight
+        #: segment across a three-hour silence crosses Lolland for every vessel that
+        #: rounded it. Longer intervals are simply not land-checked, and that
+        #: restriction is why the land finding means something when it does fire.
+        self.land_max_interval_s = land_max_interval_s
+
+        self._anchors: dict[str, AisTrack] = {}
+        self._geod: Any = None
+        self.stats = PlausibilityStats()
+        if land_mask is not None:
+            self.stats.land_check_available = True
+            self.stats.land_check_unavailable_reason = ""
+
+    @property
+    def geod(self) -> Any:
+        """
+        `pyproj.Geod` on WGS84. LIBRARIES.md names this explicitly as the one thing to
+        use for point-to-point range and bearing, and forbids hand-rolling haversine.
+        Imported lazily so reading a CSV never needs the geo stack.
+        """
+        if self._geod is None:
+            from pyproj import Geod
+            self._geod = Geod(ellps="WGS84")
+        return self._geod
+
+    def _distance_m(self, a: AisTrack, b: AisTrack) -> float:
+        _, _, distance = self.geod.inv(
+            a.claimed_lon_deg, a.claimed_lat_deg,
+            b.claimed_lon_deg, b.claimed_lat_deg)
+        return abs(float(distance))
+
+    def _finding(self, kind: ImplausibilityKind, anchor: AisTrack, track: AisTrack,
+                 dt_s: float, distance_m: float, implied_kn: float | str,
+                 claimed_value: float | str, claimed_field: str,
+                 severity: Severity, significance: float,
+                 unit: str = "kn") -> PlausibilityMismatch:
+        digest = hashlib.sha1(
+            f"{kind}|{track.track_id}|{track.report_time_utc.isoformat()}".encode()
+        ).hexdigest()
+        return PlausibilityMismatch(
+            mismatch_id=f"PIM-{digest[:8]}",
+            track_id=track.track_id,
+            claimed_mmsi=track.claimed_mmsi,
+            kind=kind,
+            claimed_value=claimed_value,
+            claimed_field=claimed_field,
+            implied_value=implied_kn,
+            implied_field="implied_speed_kn_from_consecutive_claimed_positions",
+            unit=unit,
+            delta=(implied_kn - claimed_value
+                   if isinstance(implied_kn, float) and isinstance(claimed_value, float)
+                   else None),
+            tolerance=self.max_speed_kn,
+            significance=significance,
+            severity=severity,
+            t_start_utc=anchor.report_time_utc,
+            t_end_utc=track.report_time_utc,
+            dt_s=dt_s,
+            from_lat_deg=anchor.claimed_lat_deg,
+            from_lon_deg=anchor.claimed_lon_deg,
+            to_lat_deg=track.claimed_lat_deg,
+            to_lon_deg=track.claimed_lon_deg,
+            distance_m=distance_m,
+            detector={
+                "max_speed_kn": self.max_speed_kn,
+                "min_interval_s": self.min_interval_s,
+                "min_jump_m": self.min_jump_m,
+                "teleport_jump_m": self.teleport_jump_m,
+                "zero_interval_jump_m": self.zero_interval_jump_m,
+                "land_erosion_m": (self.land_mask.erosion_m
+                                   if self.land_mask else None),
+                "coastline": (str(self.land_mask.path.name)
+                              if self.land_mask else None),
+            },
+        )
+
+    def check(self, track: AisTrack) -> list[PlausibilityMismatch]:
+        """Check one report against this vessel's anchor. Returns 0..n findings."""
+        mmsi = track.claimed_mmsi
+        anchor = self._anchors.get(mmsi)
+        if anchor is None:
+            self._anchors[mmsi] = track
+            self.stats.pairs_skipped_first_report += 1
+            return []
+
+        self.stats.pairs_seen += 1
+        dt_s = (track.report_time_utc - anchor.report_time_utc).total_seconds()
+
+        # --- same timestamp (or out of order) -------------------------------------
+        # A hull cannot be in two places at once. Most of these are two basestations
+        # decoding one transmission to coordinates that differ by rounding — 583 of
+        # 956 such pairs on the Fehmarn day differ by under 5 m. The tail is not
+        # rounding, and the leading explanation for it is TWO VESSELS SHARING ONE
+        # MMSI, which is the identity-spoof case lane A already flagged as a known
+        # limitation of track_id. The anchor is NOT advanced: the earlier report
+        # stays the base so the vessel's real motion is still measured afterwards.
+        if dt_s <= 0:
+            self.stats.zero_interval_pairs += 1
+            distance_m = self._distance_m(anchor, track)
+            if distance_m <= self.zero_interval_jump_m:
+                return []
+            self.stats.note("zero_interval_jump")
+            return [self._finding(
+                "zero_interval_jump", anchor, track, dt_s, distance_m,
+                implied_kn="instantaneous",
+                claimed_value=track.claimed_sog_kn if track.claimed_sog_kn is not None
+                else "not claimed",
+                claimed_field="claimed_sog_kn",
+                severity="major",
+                significance=distance_m / max(self.zero_interval_jump_m, 1.0),
+                unit="m")]
+
+        # --- below the noise floor: skip WITHOUT advancing the anchor --------------
+        if dt_s < self.min_interval_s:
+            self.stats.pairs_below_min_interval += 1
+            return []
+
+        self.stats.pairs_evaluated += 1
+        distance_m = self._distance_m(anchor, track)
+        findings: list[PlausibilityMismatch] = []
+
+        if distance_m < self.min_jump_m:
+            self.stats.pairs_below_min_jump += 1
+        else:
+            implied_kn = (distance_m / dt_s) / 0.514444
+            if implied_kn > self.max_speed_kn:
+                kind: ImplausibilityKind = (
+                    "teleport" if distance_m > self.teleport_jump_m
+                    else "impossible_speed")
+                self.stats.note(kind)
+                findings.append(self._finding(
+                    kind, anchor, track, dt_s, distance_m, implied_kn,
+                    claimed_value=(track.claimed_sog_kn
+                                   if track.claimed_sog_kn is not None
+                                   else "not claimed"),
+                    claimed_field="claimed_sog_kn",
+                    severity="critical" if kind == "teleport" else "major",
+                    significance=implied_kn / max(self.max_speed_kn, 1.0)))
+
+        # --- land crossing --------------------------------------------------------
+        # Only over a short interval, where the straight segment approximates the
+        # actual path. See land_max_interval_s.
+        if self.land_mask is not None and dt_s <= self.land_max_interval_s:
+            if self.land_mask.crosses(
+                    anchor.claimed_lat_deg, anchor.claimed_lon_deg,
+                    track.claimed_lat_deg, track.claimed_lon_deg):
+                self.stats.note("crosses_land")
+                findings.append(self._finding(
+                    "crosses_land", anchor, track, dt_s, distance_m,
+                    implied_kn=(distance_m / dt_s) / 0.514444,
+                    claimed_value="at sea",
+                    claimed_field="claimed_lat_deg/claimed_lon_deg",
+                    severity="critical", significance=1.0, unit="none"))
+
+        self._anchors[mmsi] = track
+        return findings
+
+    def check_all(self, tracks: Iterator[AisTrack]) -> list[PlausibilityMismatch]:
+        """
+        Run over a whole source.
+
+        Anchors are keyed by MMSI, so vessels may be INTERLEAVED — a globally
+        time-ordered stream like `DmaCsvSource` (or a live feed) works unchanged, and
+        no sort is needed. The one real requirement is that reports for a GIVEN
+        vessel arrive in time order; out-of-order arrivals land in the dt <= 0 branch
+        and are reported as zero-interval pairs rather than silently inverting a
+        speed.
+        """
+        out: list[PlausibilityMismatch] = []
+        for track in tracks:
+            out.extend(self.check(track))
+        return out
+
+
+def anonymise_mmsi(mmsi: str, order: Sequence[str]) -> str:
+    """
+    Real MMSI -> a recognisably synthetic one, for anything a judge or a camera sees.
+
+    MID 999 is unassigned to any country, so a 999-prefixed MMSI is obviously fake to
+    anyone who reads AIS — chosen over a hash, because a hashed MMSI still LOOKS like
+    a real MMSI and someone will eventually paste one into a vessel database. Same
+    scheme as `02_data/make_golden_window.py`.
+
+    Required here and not optional: these findings are the closest thing in the
+    pipeline to an accusation, and every one of them is far more likely to be a cheap
+    transponder than a deception. Naming a real hull beside the words "impossible" or
+    "teleport" is exactly the defamation CLAUDE.md forbids.
+    """
+    return f"999{list(order).index(mmsi) + 1:06d}"
+
+
+def plausibility_report(csv_path: str | Path, *, coastline: str | Path | None = None,
+                        bbox: tuple[float, float, float, float] | None = None,
+                        examples: int = 3) -> None:
+    """
+    Run the plausibility check over a slice and print the counts, the threshold
+    sensitivity, and a few anonymised examples.
+
+    A real report generator, not a smoke test — the numbers it prints go into
+    02_data/INVENTORY.md and onto a slide, which is why every count is printed beside
+    the thresholds that produced it.
+    """
+    source = DmaCsvSource(csv_path)
+    tracks = list(source.tracks())
+    order = sorted({t.claimed_mmsi for t in tracks})
+    print(source.stats.summary())
+
+    mask = None
+    if coastline is not None:
+        mask = LandMask(coastline, bbox=bbox)
+        print(f"\ncoastline: {Path(coastline).name}, {mask.n_polygons} land polygons "
+              f"after {mask.erosion_m:.0f} m erosion")
+    else:
+        print("\ncoastline: NONE CONFIGURED — the land check will not run, and its "
+              "absence is reported rather than silently skipped.")
+
+    checker = PlausibilityChecker(land_mask=mask)
+    findings = checker.check_all(iter(tracks))
+    print()
+    print(checker.stats.summary())
+    print(f"\nTOTAL FINDINGS: {len(findings):,} across "
+          f"{len({f.claimed_mmsi for f in findings}):,} vessels")
+
+    print("\n--- MINIMUM-INTERVAL SENSITIVITY ---")
+    print("The single parameter that decides whether this tool is useful. Below the "
+          "floor, GPS scatter dominates real movement.")
+    print(f"{'min_interval_s':>15} {'findings':>10} {'vessels':>9}")
+    for floor in (0.0, 2.0, 5.0, 10.0, 30.0, 60.0):
+        probe = PlausibilityChecker(min_interval_s=floor)
+        got = probe.check_all(iter(tracks))
+        print(f"{floor:>15.0f} {len(got):>10,} "
+              f"{len({f.claimed_mmsi for f in got}):>9,}")
+
+    print(f"\n--- {examples} EXAMPLES (MMSI ANONYMISED) ---")
+    for finding in sorted(findings, key=lambda f: -(f.distance_m or 0))[:examples]:
+        print(f"\n[{finding.kind}] {finding.severity} | "
+              f"MMSI {anonymise_mmsi(finding.claimed_mmsi, order)} | "
+              f"{finding.mismatch_id}")
+        print(f"  {finding.t_start_utc}  ({finding.from_lat_deg:.5f}, "
+              f"{finding.from_lon_deg:.5f})")
+        print(f"  {finding.t_end_utc}  ({finding.to_lat_deg:.5f}, "
+              f"{finding.to_lon_deg:.5f})")
+        print(f"  {finding.distance_m:,.0f} m in {finding.dt_s:.0f} s -> implied "
+              f"{finding.implied_value} vs claimed {finding.claimed_value} "
+              f"{finding.unit}")
+    print("\nEvery finding above is a CLAIM CONTRADICTING ITSELF, not a spoof. The "
+          "leading explanation is a cheap Class B transponder. Lane C may promote "
+          "one to SpoofSubtype='kinematic' only with corroborating evidence.")
+
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) < 2:
+        sys.exit("usage: python3 03_src/ais_ingest.py <slice.csv> [coastline.shp]")
+    plausibility_report(sys.argv[1],
+                        coastline=sys.argv[2] if len(sys.argv) > 2 else None,
+                        bbox=(54.40, 54.80, 11.00, 11.80))

@@ -185,6 +185,14 @@ class EoContact(_Contract):
     bbox_px: tuple[int, int, int, int] = Field(
         description="(x_min, y_min, x_max, y_max), origin top-left.")
 
+    detection_confidence: float = Field(
+        ge=0.0, le=1.0,
+        description="The EO detector's confidence that this box IS A VESSEL. Distinct "
+                    "from observed_class_confidence, which is confidence in WHICH class "
+                    "it is. YOLO answers the first question and cannot answer the "
+                    "second; merging them mis-calibrates DARK confidence silently, with "
+                    "no exception and no visible symptom.")
+
     observed_bearing_deg_true: float = Field(
         ge=0.0, lt=360.0,
         description="Criterion 1 requires bearing out. TRUE, not relative, not "

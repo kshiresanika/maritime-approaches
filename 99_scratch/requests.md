@@ -83,7 +83,10 @@ required to). Purely additive — no existing field changes meaning.
 
 NOTE: `observed_class` stays `None` out of lane B. The VLM (Qwen3-VL) fills it later;
 COCO cannot.
-STATUS: OPEN
+STATUS: RESOLVED 2026-08-29. Applied as a REQUIRED field by Amol (ARCH) with the agent
+acting on his explicit authorisation in-session. contracts.py + tests/fixtures.py edited
+as requested. Blast radius was larger than this request stated: see the lane D entry
+below.
 
 ---
 
@@ -290,3 +293,308 @@ WHY:    uncalibrated_benchmark_pose() sets yaw_uncertainty_deg = 180.0 deliberat
 IMPACT: None required. If a CameraPose contract lands (request 1) and yaw uncertainty
         moves out of bearing_uncertainty_deg, this guard must move with it.
 STATUS: FYI — no action needed
+
+### 2026-08-28 21:45 UTC | C -> ARCH | 03_src/contracts.py
+WANT:   Either add `observed_width_m` (+ its uncertainty) to EoContact, or remove
+        "width" from MismatchDimension.
+WHY:    MismatchDimension offers "width" but EoContact has no observed width field, so
+        the dimension is unreachable — consistency.py cannot emit it and never will.
+        Cause and effect: an unreachable enum member reads to a judge (and to lane D
+        building the evidence card) as a check the pipeline runs, when in fact nothing
+        can ever produce it. The tempting workaround is worse than the gap: deriving
+        beam from the bounding-box aspect ratio silently encodes the vessel's ASPECT
+        ANGLE as if it were its width, so a ship viewed bow-on would read as a 20 m
+        beam on a 250 m hull and generate a critical spoof from pure geometry. No
+        width comparison is made and none is faked. NOTE: contracts.py already gives
+        AisTrack the Size A-D fields, so the CLAIMED side is fully available — the gap
+        is entirely on the observed side.
+IMPACT: contracts.py, consistency.py (one comparison added if width lands), lane B's
+        eo_detector if it is asked to estimate beam.
+STATUS: OPEN
+
+### 2026-08-28 21:45 UTC | C -> ARCH + B | 03_src/contracts.py (EoContact)
+WANT:   Uncertainty fields for observed heading and observed speed:
+        `observed_heading_uncertainty_deg`, `observed_speed_uncertainty_ms`.
+WHY:    EoContact pairs an uncertainty with bearing, range and length, but NOT with
+        heading or speed — so consistency.py must ASSUME both. It currently uses
+        OBSERVED_HEADING_SIGMA_DEG = 20.0 and OBSERVED_SPEED_RELATIVE_SIGMA = 0.25,
+        declared in the module and destined for EvidenceRecord.limitations. Cause and
+        effect: those two constants set the significance of every heading and speed
+        mismatch, which sets their severity, which feeds the verdict confidence. A
+        heading sigma that is wrong by a factor of two moves a finding two severity
+        bands. Lane B knows the real numbers — heading sigma depends on pixel extent
+        and aspect angle, speed sigma on the range error and the frame interval —
+        and lane C is guessing them from the outside. This is the single largest
+        uncalibrated assumption in consistency.py.
+IMPACT: contracts.py, eo_detector.py (populate), consistency.py (use instead of the
+        constants), report.py (limitations wording).
+STATUS: OPEN
+
+---
+
+### 2026-08-28 15:40 UTC | A -> ARCH | 03_src/contracts.py
+**INTERRUPT, not a queue item — three modules stall behind it.**
+
+WANT: three additions. Nothing existing changes meaning; all of it is additive.
+
+**(1) A THIRD PREFIX: `implied_`.** Alongside `claimed_` (what the transponder
+asserts) and `observed_` (what the camera sees), a value computed from consecutive
+CLAIMED POSITIONS is neither. Speed derived from two AIS positions is not an
+observation — no sensor saw it — and it is not a claim, because the transponder never
+broadcast it. It is what the claim implies about itself.
+
+**(2) Additive optional fields on `AisTrack`** (all `float | None = None`, all
+per-report, so they fit the object's existing shape):
+```
+implied_speed_ms         # movingpandas Trajectory.add_speed, m/s on EPSG:4326
+implied_course_deg_true  # movingpandas Trajectory.add_direction, deg true 0-360
+gap_before_s             # seconds since this vessel's previous report
+```
+
+**(3) A NEW FROZEN TYPE `BehaviourEvent`,** plus
+`EvidenceRecord.behaviour_events: list[BehaviourEvent] = []`. The exact shape lane A
+already emits as a local mirror dataclass is in `03_src/ais_trajectory.py` — copy it:
+```
+event_id, track_id, claimed_mmsi
+kind: Literal["loiter", "ais_gap"]
+t_start_utc, t_end_utc (AwareDatetime), duration_s
+centroid_lat_deg, centroid_lon_deg
+radius_m                                   # loiter only
+resume_lat_deg, resume_lon_deg, gap_distance_m, implied_gap_speed_ms   # gap only
+distance_to_area_edge_m
+explained_by_area_exit: bool
+explained_by_sparse_coverage: bool
+claimed_nav_statuses: tuple[str, ...]
+claimed_ship_type: str | None
+detector: dict[str, Any]                   # the thresholds it was detected under
+```
+
+WHY (1) AND (2): this is a spoofing detector that needs NO CAMERA. AIS broadcasts SOG
+as its own field AND broadcasts the positions from which a speed can be computed. A
+vessel reporting SOG 0.2 kn while its own position reports move it 400 m per minute
+has contradicted itself — that is `SpoofSubtype="kinematic"`, available on recorded
+data, on day one, with no EO frame and no association step. It is the cheapest
+criterion 3 evidence in the pipeline. **It exists only if the two speeds live in
+separate fields.** Write the derived speed into `claimed_sog_kn` and the contradiction
+is arithmetically erased; there is nothing left to compare.
+
+WHY NOT `derived_`: `implied_` says where it came from — the claim implies it. The
+whole point is that it stays on the CLAIMED side of the wall while not being an
+assertion the vessel made.
+
+WHY (3) IS A NEW TYPE AND NOT MORE `AisTrack` FIELDS: `AisTrack` is a per-report
+snapshot — one timestamp, one position, frozen. A loiter is a SPAN over hundreds of
+reports. Stamping `in_loiter=True` on each report repeats a span-shaped fact hundreds
+of times, and the thing an operator needs — when it started, when it ended, where the
+centre was, how wide it was — then exists only implicitly, recoverable by rescanning
+the whole track. Criterion 2 has to say "this vessel, because it sat over the cable
+route for 47 minutes" and criterion 4 has to quote that span into a case file.
+Neither survives being smeared across per-report booleans. `EvidenceRecord` embeds
+`mismatches` as snapshots for exactly this reason; behaviour needs the same treatment
+or it cannot appear on the evidence card at all.
+
+MEASURED, so the volume is known rather than guessed — Fehmarn slice, full 24 h,
+431,745 deduped vessel reports, 315 vessels: **660 AIS gaps over 10 minutes across
+108 vessels**, and 146 over 30 minutes. Loiter events are of the same order. This is
+hundreds of objects per day, not millions.
+
+NOTE ON THE `AisTrack` DOCSTRING: it currently reads "carries `claimed_*` fields ONLY.
+Nothing observed may be written to it." That sentence stays TRUE — `implied_` is not
+observed — but it should be amended to name the third category explicitly, or the
+next person to read it will assume `implied_speed_ms` is a contract violation and
+delete it.
+
+ALTERNATIVE IF YOU WANT `AisTrack` KEPT ABSOLUTELY PURE: put the three per-report
+values on their own frozen type keyed by (track_id, report_time_utc). Costs a second
+object per report — 431,745 extra objects for one day of one slice — and every
+consumer then has to join. Lane A recommends the additive fields; the decision is
+yours because it is your wall.
+
+IMPACT: `03_src/contracts.py` (3 fields on `AisTrack`, 1 new type, 1 field on
+`EvidenceRecord`), `tests/fixtures.py` (optional — all new fields have defaults),
+`00_brief/CONTRACTS.md` (the prose companion and the wall diagram),
+`03_src/ais_trajectory.py` (drops its local mirror, imports the real type),
+`03_src/consistency.py` (gains the free kinematic self-contradiction test),
+`03_src/prioritizer.py` and `03_src/report.py` (can finally cite a loiter).
+Purely additive — no existing field changes type or meaning, so nothing breaks while
+this is pending.
+STATUS: OPEN
+
+### 2026-08-28 15:40 UTC | A -> ARCH | 03_src/ais_trajectory.py, tests/test_ais_trajectory.py
+WANT: acknowledgement of two new files, and a line in FILE_OWNERSHIP.md §2 under
+lane A.
+WHY: trajectory analysis is a different question from ingest ("what did the claimed
+track DO" vs "what is being claimed") and it needs movingpandas, geopandas and
+shapely. Folding it into `ais_ingest.py` would make the geo stack a hard dependency
+of reading a CSV, so a teammate whose `geopandas` install is broken could not read
+AIS at all — on a night when that is the difference between a demo and no demo.
+`ais_ingest.py` was also already 851 lines.
+IMPACT: two new files, no existing file changes. `ais_ingest.py` is untouched and
+still imports nothing beyond pandas and contracts.
+STATUS: OPEN
+
+### 2026-08-28 15:40 UTC | A -> C, D | consistency.py, prioritizer.py
+WANT: treat `explained_by_area_exit` and `explained_by_sparse_coverage` on a gap
+event as SUPPRESSORS, not as score inputs, and discount loiter events whose
+`claimed_nav_statuses` intersect {Moored, At anchor, Aground, Not under command}.
+WHY, with the measurement: at a 30-minute threshold the Fehmarn day contains 293
+stationary periods, and **the top two ship types among those NOT declaring a
+stationary status are Tug (71) and Sailing (65)** — the tunnel construction fleet and
+becalmed yachts. A ranked list that does not discount them is a list of harbour
+furniture, and criterion 2 is judged on whether the top of that list deserves the
+patrol boat. Likewise 660 gaps at 10 minutes is not 660 dark vessels: the maximum gap
+in the day is 17.6 hours, which is a vessel that left the 0.4x0.8 degree box and came
+back, not a transponder switched off for a working day.
+IMPACT: `03_src/consistency.py`, `03_src/prioritizer.py`. No contract change beyond
+the request above.
+STATUS: OPEN
+
+### 2026-08-28T14:55Z | B -> C | 03_src/association.py
+WANT: Two small consolidations, both optional and neither blocking. Lane C decides.
+
+(1) Replace the private `_shortest_arc_deg` (association.py:214) with
+    `from geometry import signed_delta_deg`.
+(2) Be aware that `geometry.inverse_geodesic()` also wraps `Geod.inv`, for lane D's
+    contact-to-infrastructure case.
+
+WHY: LIBRARIES.md says the signed-shortest-arc helper is "One helper in geometry.py,
+owned by lane B, used by everyone." There are now two implementations. They agree
+today — I checked the arithmetic, both are ((a-b+180) % 360) - 180 — so this is not a
+bug, it is a divergence risk: the next person who fixes a boundary case fixes one of
+them. Verified boundary behaviour, worth knowing either way: exactly-opposite angles
+return -180, never +180. Anything comparing with abs() is unaffected; anything
+branching on the sign of a 180 deg delta is relying on a coin flip.
+
+On (2): `predict_measurement()` is deliberately NOT duplicated in geometry.py — your
+docstring is right that two implementations of that projection are two chances to be
+wrong, and geometry.py provides only the INVERSE (`project_to_position`, Geod.fwd),
+which nothing else had. But both files now construct `Geod(ellps="WGS84")`
+independently. If the ellipsoid ever changes it must change in both.
+
+IMPACT: (1) is one import and one deletion in association.py, no behaviour change.
+(2) is awareness only, no code change.
+STATUS: OPEN
+
+---
+
+### 2026-08-28 16:55 UTC | A -> ARCH | 03_src/contracts.py
+**Second contract interrupt. Additive, and independent of the BehaviourEvent one —
+either can land first.**
+
+WANT: make `Mismatch` able to carry a claim contradicting ITSELF.
+1. Add `"position_implausible"` to `MismatchDimension`.
+2. Make `association_id` optional: `str | None = None`.
+3. Add `comparison: Literal["claimed_vs_observed", "claimed_vs_implied"] =
+   "claimed_vs_observed"` — defaulted, so every existing construction is unaffected.
+4. Add `implied_value: float | str | None = None` and `implied_field: str | None =
+   None`, and make `observed_value` / `observed_field` / `observation_confidence`
+   optional.
+
+WHY, concretely: `03_src/ais_ingest.PlausibilityChecker` compares a vessel's claimed
+SOG against the speed its OWN consecutive claimed positions imply. Nothing observed
+it. Two required fields on `Mismatch` therefore have no truthful value:
+  * `association_id` — nothing was paired, because nothing was seen. Synthesising one
+    puts a fabricated association into something we call evidence-grade.
+  * `observation_confidence` — there is no observation to be confident about.
+
+WHY THE `comparison` DISCRIMINATOR IS THE LOAD-BEARING PART: without it, the only
+place to put an implied speed is `observed_value`, and a consumer that reads
+`observed_value` will weight the verdict with an EO uncertainty that was never
+computed. That failure is silent — no exception, just a confidence number that means
+something different from what its field name says. This is the same wall the
+`implied_` prefix request protects, applied to `Mismatch` instead of `AisTrack`.
+
+Lane A ships `PlausibilityMismatch` — a local mirror with the requested field names —
+so C and D are unblocked and the swap is one import. It carries a test asserting it
+has NO `observed_*` field and no `observation_confidence`, mirroring your
+`test_verdict_has_nowhere_to_put_model_generated_text`.
+
+MEASURED VOLUME, so this is not speculative: **41 findings across 27 vessels** on the
+Fehmarn day at the shipped thresholds — 15 impossible_speed, 9 teleport, 17
+zero_interval_jump. Tens per day, not thousands.
+
+IMPACT: `03_src/contracts.py` only. All four changes are additive or widen an
+existing type, so nothing currently constructing a `Mismatch` breaks.
+`tests/fixtures.py` unaffected (new fields default). `03_src/consistency.py` gains a
+second producer of Mismatch records.
+STATUS: OPEN
+
+### 2026-08-28 16:55 UTC | A -> C, D | verdict.py, prioritizer.py
+WANT: a `position_implausible` finding must NOT reach a SPOOF verdict on its own. It
+needs corroboration — an EO contact, or a second independent inconsistency.
+
+WHY, with the measurement: of the 41 findings on the Fehmarn day, **26 are on vessels
+claiming ship type "Sailing" and every worked example is Class B.** The leading
+explanation is a cheap consumer GPS on a small craft, not deception. The check is a
+DATA-QUALITY signal that lane C may promote to `SpoofSubtype="kinematic"` with
+corroboration; promoted alone, it puts the word "spoof" against a real named yacht,
+which is the defamation CLAUDE.md forbids outright.
+
+Note also that the naive version of this check produces **705** findings instead of
+41, and 96% of those are GPS scatter at 1 Hz sampling. If the number you receive ever
+jumps by an order of magnitude, someone has lowered `min_interval_s` — check the
+`detector` dict on the finding before believing it.
+IMPACT: `03_src/verdict.py`, `03_src/prioritizer.py`. No contract change beyond the
+request above.
+STATUS: OPEN
+
+### 2026-08-29T06:20Z | B -> C | 03_src/consistency.py
+WANT: Awareness, and a decision that is yours. No code change requested.
+
+Measured against YOUR arithmetic (`_probability_to_sigma`, `min_report_sigma=2.0`,
+`confusable_class_discount=0.5`, `min_class_confidence=0.60`):
+
+  * A class mismatch needs VLM confidence >= 0.9772 to reach 2.0 sigma.
+  * A CONFUSABLE PAIR CAN NEVER FIRE. Max reachable significance is 3.719 sigma
+    (confidence clips at 0.9999); halved, that is 1.860 against a 2.0 floor. So
+    cargo/tanker, tug/small_craft, fishing/small_craft, tug/fishing and passenger/cargo
+    cannot produce a class Mismatch at any confidence whatsoever.
+  * eo_vlm.py caps VLM confidence at the Wilson 95% lower bound of its MEASURED
+    agreement rate, because a classifier may not claim more confidence than its
+    demonstrated hit rate. A perfect 20-crop sample yields a ceiling of 0.8389
+    (0.990 sigma). Reaching 0.9772 needs ~165 hand-labelled crops at 100% agreement.
+
+WHY YOU MAY WANT TO KNOW: taken together, the class dimension will almost certainly
+contribute ZERO mismatches in the demo. I believe that is correct and deliberate on your
+part — your own docstring says "silhouette classification is the weakest evidence in the
+system and the arithmetic should say so rather than the footnotes" — and lane B is not
+asking you to weaken it. Lane B has capped its own output rather than lobbying to lower
+your floor.
+
+But it means the class-spoof row in DEMO_INDOOR.md's fault-injection table ("rewrite
+claimed_ship_type to cargo over a tug silhouette") will NOT produce a SPOOF verdict via
+check_class. tug/cargo is not in CONFUSABLE_CLASSES so it is not blocked by the discount,
+but it still needs >= 0.9772 confidence, which an uncalibrated VLM will not be permitted
+to assert. If that demo row is meant to fire, the lever is yours: a class-specific
+min_report_sigma, or accepting group-level (large_commercial vs small_craft) disagreement
+at a lower bar. LENGTH mismatch is unaffected and remains the strong path.
+
+IMPACT: none unless you choose to act. Lane B changes nothing either way.
+STATUS: OPEN
+
+### 2026-08-29T07:05Z | ARCH -> D | 04_demo/make_synthetic_eo.py
+DISCLOSURE, not a request. This file was EDITED by the agent under Amol's explicit
+authorisation as ARCH, because making `EoContact.detection_confidence` required broke
+both of its construction sites and lane D was not in the room. Flagging it because the
+one-owner-per-file rule exists precisely so this does not happen silently.
+
+WHAT CHANGED:
+1. New module-level helper `_synthetic_detection_confidence(apparent_width_px, rng)`.
+2. Line ~523 (real vessel) now passes `detection_confidence=..._(width_px, rng)`.
+3. Line ~567 (clutter)      now passes `detection_confidence=..._(w, rng)`.
+
+THE DESIGN CALL YOU MAY WANT TO OVERRIDE: confidence is a saturating function of
+APPARENT PIXEL WIDTH, and the SAME rule is used for real vessels and for injected
+clutter. Giving clutter a systematically lower confidence would have been easier and
+would have been cheating — anything downstream could then separate clutter from real
+contacts trivially, and the false-positive rate measured on this scene would be
+optimistic in a way nothing in the output reveals. With the width rule, clutter (6-22 px)
+lands at 0.43-0.58 and a genuinely distant real vessel at 12 px lands at 0.49, inside the
+same band. The ambiguity is real and the pipeline has to earn its way out of it.
+
+Measured curve: 6 px -> 0.427, 22 px -> 0.583, 40 px -> 0.698, 200 px -> 0.896, sigma 0.05.
+
+ACTION REQUIRED BY WHOEVER OWNS 04_demo/: `04_demo/out/scene01/eo_contacts.jsonl` was
+written before the field existed and will now FAIL to load in run_pipeline.py:73 and
+app.py:143. Regenerate it — command in STATUS.md and handoff_B.md.
+STATUS: OPEN — lane D to review the design call above

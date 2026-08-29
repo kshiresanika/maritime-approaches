@@ -51,9 +51,41 @@ Then faults are **injected deliberately**, because a demo needs something to fin
 That last row is the one to demo to a judge. Anyone can make an alert fire. Showing the
 case where your system **declines to** is criterion 4.
 
-Output: `04_demo/make_synthetic_eo.py` (NOT WRITTEN YET — lane C/D, next task).
-Ground truth is known by construction, so this is also the only way to state a measured
-false-positive rate on Sunday morning.
+Implemented in **`04_demo/make_synthetic_eo.py`**. Ground truth is known by
+construction, so this is also the only way to state a measured false-positive rate on
+Sunday morning.
+
+Three properties of that harness worth knowing before you touch it:
+
+1. **Measurement error is mandatory, not optional.** A perfect projection of the claims
+   would associate at zero sigma, pass every tolerance, and prove only that `a == a` —
+   while hiding real defects in `association.py` until a judge finds them. The noise
+   model applies bearing error from the pose, *fractional* range error (25% 1-sigma,
+   because monocular range divides by an apparent size a few pixels wide), length error,
+   class confusion **restricted to visually similar types** (a VLM confuses tanker with
+   cargo, never tanker with fishing boat — random confusion would manufacture easy
+   spoofs a real system never sees), random missed detections, and clutter contacts
+   belonging to no vessel at all. `--noise none` exists for debugging plumbing and must
+   never be used for a demo.
+2. **The answer key is a separate file.** No field on `EoContact` or `AisTrack` records
+   that a vessel was tampered with. If the key travelled inside the data a downstream
+   lane could read it by accident, score 100%, and nobody would find out until the demo.
+   Nothing in `03_src` may import `ground_truth.jsonl`.
+3. **The spoofer is competent by default.** AIS declares dimensions twice — Length/Width,
+   and the reference offsets Size A/B/C/D where A+B == length. A lazy spoofer changes only
+   Length and can be caught from the AIS message alone, no camera required. The harness
+   updates both by default, so the injected spoof is only catchable by comparing against
+   the camera. `--lazy-spoofer` generates the easy one, and `consistency.py` should catch
+   *both*.
+
+```bash
+python 04_demo/make_synthetic_eo.py \
+    --ais 02_data/golden/<window>_anon.csv \
+    --out 04_demo/out/scene01 --seed 20260830 --dry-run
+```
+
+The harness **refuses to run on non-999 MMSIs** unless explicitly forced — if it stops,
+you have pointed it at the real-identity file sitting next to the pseudonymised one.
 
 ### D1 — Live camera, tabletop scale range (THE LIVE PROOF. Build second.)
 
@@ -134,11 +166,13 @@ more credible than a team that claims a sea trial nobody can verify.
 
 ## Setup checklist (do Saturday morning, not Sunday)
 
-- [ ] `make_synthetic_eo.py` written and D0 running end to end
+- [x] `make_synthetic_eo.py` written
+- [ ] `make_golden_window.py` run — `02_data/golden/` is still EMPTY, D0 cannot run without it
+- [ ] D0 running end to end on the Mac
 - [ ] Golden window loaded, 139 vessels, 1 h, pseudonymised
 - [ ] Five injected faults produce five expected verdicts, plus the control that stays silent
 - [ ] Toy boats / printed silhouettes acquired
 - [ ] **YOLO tested against the actual silhouettes** — this is the D1 kill switch
-- [ ] Table measured, pose written, `yaw_uncertainty_deg` set honestly
+- [ ] Table measured, `camera_pose_TABLETOP.json` filled, `yaw_uncertainty_deg` set honestly
 - [ ] Second monitor + harbour clip on disk as the D2 fallback
 - [ ] Whole demo rehearsed once with the laptop on battery and wifi OFF

@@ -1,0 +1,12 @@
+# Tabletop range validation — ground truth measured with a tape measure.
+# One row per silhouette placement. Fill this in during the D1 setup, then run:
+#   python 03_src/geometry.py --validate 04_demo/tabletop_truth.csv \
+#          --flat --height <camera height above table, m> --hfov <measured> \
+#          --horizon-row <row px of the table's vanishing line, if you can mark it> \
+#          --pitch <camera pitch, positive nose-DOWN, if you cannot>
+# row_px  = the bottom edge of the detected box, in pixels from the TOP of the frame.
+#           Read it from the eo_detector JSONL: bbox_px is (x1, y1, x2, y2), so row_px
+#           is the fourth number.
+# true_range_m = horizontal distance from the camera's position on the table to the
+#           base of the silhouette. Measure along the table, not line-of-sight.
+row_px,true_range_m

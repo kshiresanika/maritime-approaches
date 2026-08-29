@@ -283,6 +283,229 @@ check against one known vessel's port call; not yet done.
 
 ---
 
+### 4.10 Behaviour — loiter and AIS gaps, Fehmarn slice, full 24 h
+
+Produced by `03_src/ais_trajectory.py` (movingpandas 0.23.0). Population after
+deduplication and AtoN exclusion: **431,745 reports / 315 vessels**. Six vessels have
+a single report and are dropped — `TrajectoryCollection.__iter__` raises on any
+trajectory with fewer than two points, so the floor is structural, not cosmetic.
+
+#### AIS gaps — exact counts
+
+Same arithmetic as `Trajectory.add_timedelta` and `ObservationGapSplitter`
+(`t.diff() > gap`, per trajectory), so these are the module's numbers.
+
+| threshold | gaps | vessels affected |
+|---|---:|---:|
+| > 5 min | 3,265 | 157 |
+| **> 10 min** | **660** | **108** |
+| > 15 min | 333 | 89 |
+| > 30 min | 146 | 65 |
+| > 60 min | 60 | 36 |
+
+Duration of gaps over 10 minutes: median **15.0 min**, p90 **55.5 min**, max
+**17.6 h**.
+
+**660 gaps is not 660 dark vessels.** The 17.6-hour maximum is a vessel that left the
+0.4° × 0.8° box and came back, not a transponder switched off for a working day. Each
+event carries `explained_by_area_exit` (last position within 2 km of the slice
+boundary) and `explained_by_sparse_coverage` (this vessel's own median reporting
+interval more than 3× the area median) so lane C can suppress rather than score them.
+The explained/unexplained split is produced by the run, not estimated here.
+
+#### Loiter — proxy counts pending the geometric run
+
+The module detects loiter **geometrically**: `TrajectoryStopDetector`, stayed inside
+`max_diameter` metres for `min_duration`. That needs shapely and geopandas.
+
+The table below is a **different detector on a different input** — maximal runs of
+**claimed SOG < 0.5 kn**, computed with pandas alone, no distance maths. It bounds the
+answer and it exposes the ranking problem; **it is not the module's number**, and the
+two are expected to differ. Where they differ is itself informative: a vessel claiming
+SOG 0 while its own positions move is a kinematic self-contradiction.
+
+| min duration | stationary periods | vessels | **not declaring a stationary status** |
+|---|---:|---:|---:|
+| ≥ 15 min | 416 | 133 | 341 |
+| **≥ 30 min** | **293** | **117** | **224** |
+| ≥ 60 min | 215 | 113 | 151 |
+
+At the 30-minute threshold, by claimed navigational status:
+
+| status | events | |
+|---|---:|---|
+| Under way using engine | 92 | **stopped while declaring way on** |
+| Unknown value | 92 | no usable status claim |
+| Moored | 56 | declared stationary |
+| Restricted maneuverability | 39 | |
+| At anchor | 9 | declared stationary |
+| Not under command | 4 | declared stationary |
+| Under way sailing | 1 | |
+
+By claimed ship type, among those **not** declaring a stationary status:
+
+| ship type | events |
+|---|---:|
+| Tug | 71 |
+| Sailing | 65 |
+| Pleasure | 18 |
+| Other | 17 |
+| Dredging | 10 |
+| Passenger | 10 |
+| Port tender | 10 |
+| SAR | 6 |
+
+**This table is the criterion 2 problem in one place.** A bare stop count is dominated
+by the Fehmarnbelt tunnel construction fleet and by becalmed yachts. Ranking without
+discounting them produces a list of harbour furniture, and criterion 2 is judged on
+whether the top of the list deserves the patrol boat. Every `BehaviourEvent` therefore
+carries the claimed statuses observed during it.
+
+#### Thresholds are arguments, not facts
+
+Every count above is quoted with the threshold that produced it, and
+`ais_trajectory.gap_sensitivity()` / `loiter_sensitivity()` emit the full sweep. A
+loiter count without its diameter and duration is not a measurement, and a judge is
+entitled to ask what happens at five minutes instead of ten.
+
+---
+
+### 4.11 Plausibility — where the claim contradicts itself
+
+Produced by `ais_ingest.PlausibilityChecker`. Compares each vessel's claimed SOG
+against the speed implied by its OWN consecutive claimed positions, and (when a
+coastline is configured) tests whether the segment between two reports crosses land.
+Nothing is observed here; this is claim against claim.
+
+#### The parameter that decides whether this check is useful at all
+
+Naive version — implied speed over consecutive reports, no interval floor:
+**705 findings across 146 vessels.** Of those, **564 (80%) are over Δt ≤ 2 s with a
+median jump of 57 metres.** 57 m in one second is 111 knots. It is also the ordinary
+scatter of a consumer GPS fix. At 1 Hz reporting, position NOISE exceeds position
+CHANGE, so the naive check is measuring the receiver, not the ship.
+
+| minimum sampling interval | pairs implying > 50 kn | vessels |
+|---|---:|---:|
+| 0 s (naive) | 705 | 146 |
+| 2 s | 345 | 106 |
+| 5 s | 50 | 34 |
+| **10 s (shipped)** | **19** | **16** |
+| 30 s | 6 | 6 |
+
+Ship the naive version and 96% of what an operator sees is receiver noise — which is
+how a decision-support tool teaches its user to ignore it.
+
+#### Counts at the shipped thresholds
+
+`max_speed_kn=50` (no vessel in the slice claims more than 47.0 kn),
+`min_interval_s=10`, `min_jump_m=100`, `teleport_jump_m=1000`,
+`zero_interval_jump_m=100`. Anchor rule: a report closer than the minimum interval is
+skipped **without advancing the anchor**, so a 1 Hz vessel is still checked roughly
+every ten seconds rather than never.
+
+| | pairs |
+|---|---:|
+| evaluated | 278,934 |
+| skipped, inside the minimum interval | 151,998 |
+| skipped, jump below the 100 m noise floor | 243,278 |
+| same-timestamp pairs | 498 |
+| first report of a vessel | 321 |
+
+**TOTAL: 41 findings across 27 vessels.**
+
+| kind | count | meaning |
+|---|---:|---|
+| `zero_interval_jump` | 17 | two positions in the same second, > 100 m apart |
+| `impossible_speed` | 15 | > 50 kn implied, jump ≤ 1 km |
+| `teleport` | 9 | > 50 kn implied, jump > 1 km |
+| `crosses_land` | — | **not run: no coastline configured yet** |
+
+By claimed ship type:
+
+| ship type | impossible_speed | teleport | zero_interval_jump |
+|---|---:|---:|---:|
+| Sailing | 9 | 7 | 10 |
+| Pleasure | 3 | 1 | 2 |
+| Cargo | 1 | 1 | 2 |
+| Law enforcement | 2 | 0 | 0 |
+| Tanker | 0 | 0 | 1 |
+| Diving | 0 | 0 | 1 |
+| Port tender | 0 | 0 | 1 |
+
+**26 of 41 findings are on vessels claiming "Sailing", and every worked example is
+Class B.** The leading explanation is a cheap consumer GPS on a small craft, not
+deception. This is a data-quality signal. Lane C may promote it to
+`SpoofSubtype="kinematic"` only with corroboration — promoted alone it puts the word
+"spoof" against a real named yacht.
+
+#### The zero-interval trap
+
+956 consecutive pairs in the slice share a timestamp exactly. `ais_ingest`
+deduplicates on `(Timestamp, MMSI, Latitude, Longitude)`, so two basestations that
+decoded the SAME transmission to slightly different coordinates both survive.
+**583 of the 956 differ by under 5 metres** — that is rounding. Δt = 0 makes implied
+speed infinite, so unhandled these are 956 phantom teleports and a ZeroDivisionError
+waiting for whichever consumer divides first.
+
+But **21 of them differ by more than 100 metres in the same second**, and that is not
+rounding: a hull cannot be in two places at once. The leading explanation is the
+limitation §5.1 already records — **two vessels sharing one MMSI**, which is exactly
+the identity spoof criterion 3 calls the discriminator.
+
+#### Three examples (MMSI anonymised — 999 prefix, an unassigned MID)
+
+**A — teleport.** MMSI 999000037, claimed "Pleasure", Class B.
+09:29:01 at (54.40784, 11.19411) claiming SOG 4.9 kn; 09:29:58 at (54.40116,
+11.11360) claiming 6.9 kn. **5,281 m in 57 s = 180 kn implied**, against a claim of
+6.9 kn.
+
+**B — impossible speed.** MMSI 999000278, claimed "Sailing", Class B.
+06:18:19 at (54.53826, 11.46414); 06:18:29 at (54.54063, 11.45120).
+**878 m in 10 s = 171 kn implied**, against a claim of 5.8 kn.
+
+**C — zero-interval jump.** MMSI 999000115, claimed "Sailing", Class B.
+Two positions timestamped 17:55:22 exactly — (54.55415, 11.05359) and (54.55382,
+11.04490), **564 m apart in the same second**, claiming 7.1 and 6.7 kn.
+
+In all three the claimed SOG is entirely plausible while the positions are not. That
+is the shape of a bad fix, and it is also the shape of a position spoof. Neither this
+module nor lane A can tell them apart, which is why the finding defers.
+
+#### Coastline for the land check — LICENSED, unlike the AIS
+
+**EEA coastline for analysis (polygon), version 3.0, March 2017.**
+
+| | |
+|---|---|
+| Licence | **CC-BY 4.0**, copyright holder European Environment Agency. "No limitations to public access". Attribution required |
+| Scale | 1:100,000 minimum mapping unit |
+| Native CRS | **EPSG:3035** (ETRS89-extended / LAEA Europe) — not 4326, must be reprojected |
+| Lineage | Hybrid of EUHYDRO and GSHHG, cut at EUDEM altitude 0 |
+| Download | https://sdi.eea.europa.eu/data/9faa6ea1-372a-4826-a3c7-fb5b05e31c52 |
+
+This is the one dataset in the project whose reuse terms are **explicit and
+permissive**. It can be cited on a slide without the hedging §2 requires for the DMA
+AIS. Attribution to the EEA is a condition, not a courtesy.
+
+**Why not a coarser coastline.** geopandas 1.1.4 removed its bundled Natural Earth
+dataset, and the only shapefile otherwise on disk is a 1:110,000,000 fixture inside
+pyogrio's test folder. Its coastline error is kilometres; the Fehmarn Belt is about
+18 km wide. Using it would report that every vessel near Rødbyhavn and Puttgarden had
+sailed overland — false positives aimed precisely at the vessels closest to the
+infrastructure this tool exists to protect. **A wrong coastline is worse than no
+coastline, because a missing one is visible and a wrong one is not.**
+
+**Two deliberate restrictions on the land check.** Land is ERODED inward by 250 m
+before testing, because at 1:100,000 a vessel moored alongside a quay legitimately
+falls inside the land polygon. And the check only runs when the two reports are
+within 60 s of each other: over a longer interval the straight line between them is
+not the path the vessel took, so the segment across a three-hour silence crosses
+Lolland for every vessel that rounded it. Both trades lose real detections to avoid
+false accusations, deliberately.
+
+---
+
 ## 5. Known limitations that reach a verdict
 
 1. **One MMSI collapses to one track.** `track_id` is a surrogate over

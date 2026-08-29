@@ -281,3 +281,239 @@ def test_missing_mmsi_yields_no_track_rather_than_a_blank_one():
     row = dict(DMA_ROW, MMSI=0)
     frame = add_report_time(pd.DataFrame([row]))
     assert row_to_track_fields(next(iter_records(frame)), "test_source") is None
+
+
+# ================================================================================
+# Plausibility check — claim against itself.
+#
+# Same selection criterion as everything above: each test is a way to produce a
+# WRONG NUMBER rather than an exception. The two that matter most are the anchor
+# rule (get it wrong and 96% of the output is GPS noise) and the wall test (get it
+# wrong and lane C weights a verdict with an uncertainty that does not exist).
+# ================================================================================
+
+import importlib.util          # noqa: E402
+from datetime import timedelta   # noqa: E402
+
+import ais_ingest                # noqa: E402
+from ais_ingest import (         # noqa: E402
+    POSITION_IMPLAUSIBLE,
+    PlausibilityChecker,
+    PlausibilityMismatch,
+    anonymise_mmsi,
+)
+
+#: Only the distance-based checks need pyproj. Applied per test rather than as a
+#: module-level importorskip, which would skip the 24 pandas-only tests above too —
+#: a green-looking run that silently tested nothing is worse than a red one.
+requires_pyproj = pytest.mark.skipif(
+    importlib.util.find_spec("pyproj") is None,
+    reason="pyproj not installed; distance-based plausibility checks skipped")
+
+PT0 = datetime(2026, 8, 25, 10, 0, tzinfo=timezone.utc)
+
+
+def _track(seconds: float, lat: float, lon: float, *, mmsi: str = "219000001",
+           sog: float | None = 6.0) -> AisTrack:
+    return AisTrack(
+        track_id=f"AIS-{mmsi[-4:]}", claimed_mmsi=mmsi,
+        report_time_utc=PT0 + timedelta(seconds=seconds),
+        claimed_lat_deg=lat, claimed_lon_deg=lon, claimed_sog_kn=sog)
+
+
+def test_first_report_of_a_vessel_produces_nothing():
+    """There is nothing to compare against. It must not be an error either."""
+    checker = PlausibilityChecker()
+    assert checker.check(_track(0, 54.60, 11.30)) == []
+    assert checker.stats.pairs_skipped_first_report == 1
+
+
+@requires_pyproj
+def test_zero_interval_does_not_divide_by_zero():
+    """
+    956 consecutive pairs on the Fehmarn day share a timestamp exactly — two
+    basestations decoding one transmission. dt = 0 makes implied speed infinite, so
+    the naive implementation raises ZeroDivisionError partway through a day of AIS,
+    or silently emits 956 phantom teleports.
+    """
+    checker = PlausibilityChecker()
+    checker.check(_track(0, 54.600000, 11.300000))
+    findings = checker.check(_track(0, 54.600010, 11.300010))   # ~1.4 m apart
+    assert findings == [], "sub-metre disagreement is basestation rounding"
+    assert checker.stats.zero_interval_pairs == 1
+
+
+@requires_pyproj
+def test_zero_interval_with_a_large_jump_is_reported():
+    """
+    21 same-second pairs on the Fehmarn day differ by more than 100 m. That is not
+    rounding — a hull cannot be in two places at once. The leading explanation is two
+    vessels sharing one MMSI, which is the identity-spoof case criterion 3 calls the
+    discriminator.
+    """
+    checker = PlausibilityChecker()
+    checker.check(_track(0, 54.6000, 11.3000))
+    findings = checker.check(_track(0, 54.6050, 11.3000))       # ~556 m apart
+    assert len(findings) == 1
+    assert findings[0].kind == "zero_interval_jump"
+    assert findings[0].dt_s == 0
+    assert findings[0].implied_value == "instantaneous", "never a float here"
+
+
+@requires_pyproj
+def test_short_intervals_are_skipped_without_moving_the_anchor():
+    """
+    THE ANCHOR RULE, AND THE WHOLE POINT OF THIS CHECK.
+
+    At 1 Hz reporting a consumer GPS's own scatter exceeds the vessel's movement:
+    measured on the Fehmarn day, 564 of 705 naive "impossible speeds" are over
+    dt <= 2 s with a median jump of 57 m — 111 knots, and also an ordinary GPS fix.
+
+    But merely DISCARDING short intervals would mean a 1 Hz vessel is never checked
+    at all. The anchor must therefore stay put so the NEXT report is compared against
+    a base far enough back. This test is the difference between checking a 1 Hz
+    vessel every ten seconds and never checking it.
+    """
+    checker = PlausibilityChecker(min_interval_s=10.0)
+    checker.check(_track(0, 54.6000, 11.3000))
+    for second in (1, 2, 3):                       # all inside the floor
+        assert checker.check(_track(second, 54.6000 + second * 1e-5, 11.3000)) == []
+    assert checker.stats.pairs_below_min_interval == 3
+    # 12 s after the ANCHOR (not after the previous report), 3.3 km away.
+    findings = checker.check(_track(12, 54.6300, 11.3000))
+    assert len(findings) == 1, "the anchor must still be the t=0 report"
+
+
+@requires_pyproj
+def test_a_plausible_transit_produces_nothing():
+    """12 knots over a minute. The check must not fire on ordinary navigation."""
+    checker = PlausibilityChecker()
+    checker.check(_track(0, 54.6000, 11.3000))
+    assert checker.check(_track(60, 54.6033, 11.3000)) == []    # ~367 m, ~11.9 kn
+
+
+@requires_pyproj
+def test_impossible_speed_and_teleport_are_distinguished_by_jump_size():
+    """
+    Both are impossible; they are not equally interesting. A 900 m jump in 15 s is a
+    bad fix. A 5 km jump is a track that moved somewhere else entirely, which is why
+    it is `critical` and the other is `major`.
+    """
+    near = PlausibilityChecker()
+    near.check(_track(0, 54.6000, 11.3000))
+    a = near.check(_track(15, 54.6080, 11.3000))[0]             # ~890 m in 15 s
+    assert a.kind == "impossible_speed" and a.severity == "major"
+
+    far = PlausibilityChecker()
+    far.check(_track(0, 54.6000, 11.3000))
+    b = far.check(_track(60, 54.7000, 11.3000))[0]              # ~11 km in 60 s
+    assert b.kind == "teleport" and b.severity == "critical"
+
+
+@requires_pyproj
+def test_a_finding_is_claimed_against_implied_never_against_observed():
+    """
+    THE STRUCTURAL GUARDRAIL, mirroring ARCH's test that Verdict has nowhere to put
+    model-generated text.
+
+    A plausibility finding compares a claim with what the claim IMPLIES. Nothing
+    observed it. If an `observed_*` field or an `observation_confidence` ever appears
+    here, a consumer will weight a verdict using an EO uncertainty that was never
+    computed — silently, with no exception.
+    """
+    checker = PlausibilityChecker()
+    checker.check(_track(0, 54.6000, 11.3000))
+    finding = checker.check(_track(60, 54.7000, 11.3000))[0]
+
+    assert finding.dimension == POSITION_IMPLAUSIBLE
+    assert finding.comparison == "claimed_vs_implied"
+    assert finding.association_id is None, "nothing was paired; there is no association"
+    names = set(PlausibilityMismatch.__dataclass_fields__)
+    assert not any(n.startswith("observed_") for n in names), names
+    assert "observation_confidence" not in names
+    assert finding.implied_field.startswith("implied_")
+
+
+@requires_pyproj
+def test_findings_carry_the_thresholds_that_produced_them():
+    checker = PlausibilityChecker(max_speed_kn=50.0, min_interval_s=10.0)
+    checker.check(_track(0, 54.6000, 11.3000))
+    finding = checker.check(_track(60, 54.7000, 11.3000))[0]
+    assert finding.detector["max_speed_kn"] == 50.0
+    assert finding.detector["min_interval_s"] == 10.0
+    assert finding.detector["coastline"] is None
+    assert finding.ruleset_version == ais_ingest.PLAUSIBILITY_RULESET_VERSION
+
+
+@requires_pyproj
+def test_findings_are_frozen():
+    checker = PlausibilityChecker()
+    checker.check(_track(0, 54.6000, 11.3000))
+    finding = checker.check(_track(60, 54.7000, 11.3000))[0]
+    with pytest.raises(Exception):
+        finding.severity = "minor"
+
+
+@requires_pyproj
+def test_vessels_may_be_interleaved():
+    """
+    Anchors are keyed by MMSI, so a globally time-ordered stream — which is what both
+    DmaCsvSource and a live feed produce — needs no sorting. If this broke, every
+    vessel would be compared against a different vessel's last position and the
+    output would be nonsense rather than an error.
+    """
+    checker = PlausibilityChecker()
+    checker.check(_track(0, 54.6000, 11.3000, mmsi="219000001"))
+    checker.check(_track(1, 54.4000, 11.7000, mmsi="219000002"))
+    assert checker.check(_track(60, 54.6033, 11.3000, mmsi="219000001")) == []
+    assert checker.check(_track(61, 54.4033, 11.7000, mmsi="219000002")) == []
+
+
+def test_land_check_is_unavailable_and_says_so_rather_than_passing_silently():
+    """
+    Criterion 4: a check that did not run must be visible. A land check that quietly
+    returns "no crossings" because no coastline was loaded is worse than one that
+    fails, because the evidence card then claims a clean result nobody computed.
+    """
+    checker = PlausibilityChecker(land_mask=None)
+    assert checker.stats.land_check_available is False
+    assert "no coastline" in checker.stats.land_check_unavailable_reason
+    assert "land check" in checker.stats.summary()
+    assert "UNAVAILABLE" in checker.stats.summary()
+
+
+def test_anonymised_mmsi_is_recognisably_synthetic_and_hides_the_original():
+    """
+    These findings sit next to the words "impossible" and "teleport", which makes
+    them the closest thing in the pipeline to an accusation — and the leading cause
+    is a cheap transponder, not deception. MID 999 is unassigned to any country, so
+    the replacement cannot be mistaken for a real vessel.
+    """
+    order = ["219000001", "244000002", "265000003"]
+    out = anonymise_mmsi("244000002", order)
+    assert out == "999000002"
+    assert "244000002" not in out
+
+
+def test_reading_ais_still_does_not_require_the_geo_stack():
+    """
+    ais_ingest must remain importable and usable with pandas alone — pyproj, shapely
+    and geopandas are imported lazily, inside the functions that need them. A
+    teammate with a broken geopandas install at 03:00 must still be able to read AIS.
+    """
+    import ast
+    from pathlib import Path
+    source = Path(ais_ingest.__file__).read_text()
+    tree = ast.parse(source)
+    top_level = {
+        alias.name.split(".")[0]
+        for node in tree.body
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+        for alias in getattr(node, "names", [])
+    } | {
+        node.module.split(".")[0]
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom) and node.module
+    }
+    for banned in ("geopandas", "shapely", "pyproj", "movingpandas", "pyais"):
+        assert banned not in top_level, f"{banned} must stay a lazy import"

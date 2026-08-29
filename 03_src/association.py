@@ -57,11 +57,11 @@ LIBRARIES USED, AND THE ONE THING WRITTEN BY HAND
                                         predicted bearing. geopy.distance.geodesic
                                         returns distance only.
   numpy                                 the cost matrix
-Written by hand: _shortest_arc_deg. LIBRARIES.md assigns that helper to lane B's
-geometry.py, which is still an empty file. It is inlined here with a matching
-implementation and a request filed to lane B (99_scratch/requests.md). Replace the
-private copy with the import the moment geometry.py lands — two implementations of
-angle wrapping is exactly how a silent 180-degree error survives.
+Written by hand: shortest_arc_deg. LIBRARIES.md assigns that helper to lane B's
+geometry.py, which is still an empty file, so it lives here — PUBLIC, because
+consistency.py imports it rather than writing a second copy. Two implementations of
+angle wrapping is exactly how a silent 180-degree error survives. Request filed to
+lane B (99_scratch/requests.md); when geometry.py lands, both consumers move to it.
 
 UNITS: contracts.py conventions throughout. Degrees true, metres, m/s, aware UTC.
 """
@@ -211,12 +211,19 @@ class _Pose(NamedTuple):
 # Geometry helpers.
 # --------------------------------------------------------------------------------
 
-def _shortest_arc_deg(a_deg: float | np.ndarray, b_deg: float | np.ndarray):
+def shortest_arc_deg(a_deg: float | np.ndarray, b_deg: float | np.ndarray):
     """Signed shortest angular difference a - b, in (-180, +180].
 
-    359 deg vs 1 deg is +2, not -358. Every angular comparison in this module goes
-    through here. TEMPORARY: LIBRARIES.md assigns this to lane B's geometry.py.
-    Delete this and import it when that file exists."""
+    359 deg vs 1 deg is -2, not +358, under the registered formula
+    ((a - b + 180) % 360) - 180. (contracts.py's prose says "+2"; the sign disagreement
+    is filed as an open request to ARCH. This follows the FORMULA.)
+
+    PUBLIC, and deliberately so: consistency.py needs the identical operation for every
+    heading and COG comparison, and a second implementation of angle wrapping is
+    precisely how a silent 180-degree error survives to a demo. One function, imported.
+
+    TEMPORARY: LIBRARIES.md assigns this to lane B's geometry.py, which is still an
+    empty file. When it lands, delete this and re-export from there — do not leave two."""
     return ((np.asarray(a_deg, dtype=float) - np.asarray(b_deg, dtype=float) + 180.0)
             % 360.0) - 180.0
 
@@ -355,7 +362,7 @@ def is_in_field_of_view(
     no observation because nobody looked, not because anybody lied. Calling that a
     position spoof would flood the operator with false candidates and make the
     ranked list — criterion 2 — worthless."""
-    off_axis = np.abs(_shortest_arc_deg(bearing_deg_true, boresight_deg_true))
+    off_axis = np.abs(shortest_arc_deg(bearing_deg_true, boresight_deg_true))
     return (off_axis <= (fov_half_angle_deg + FOV_MARGIN_DEG)) & (range_m <= max_range_m)
 
 
@@ -411,7 +418,7 @@ def _pair_scores(
         # where a small-angle approximation would understate it badly.
         pred_brg_sigma = np.degrees(np.arctan2(pos_sigma, np.maximum(pred_rng, 1.0)))
         brg_sigma = np.hypot(c.bearing_uncertainty_deg, pred_brg_sigma)
-        d_brg = _shortest_arc_deg(c.observed_bearing_deg_true, pred_brg)
+        d_brg = shortest_arc_deg(c.observed_bearing_deg_true, pred_brg)
         chi2 = (d_brg / brg_sigma) ** 2
         dof = np.ones(n_t, dtype=float)
 

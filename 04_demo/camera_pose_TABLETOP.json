@@ -1,0 +1,10 @@
+{
+  "pose_ref": "tabletop-scale-range-2026-08-29",
+  "yaw_deg_true": 0.0,
+  "hfov_deg": 0.0,
+  "yaw_uncertainty_deg": 12.0,
+  "lat_deg": 54.5833,
+  "lon_deg": 11.3333,
+  "height_m": 0.0,
+  "note": "D1 TABLETOP SCALE RANGE. FILL THE ZEROS BEFORE USING FOR EVIDENCE. SCALE: 1 cm on the table = 20 m of sea, so a 1.2 m table is a 2.4 km stretch of water. lat_deg/lon_deg are a SYNTHETIC anchor in the Fehmarn Belt -- they are a coordinate frame, not a claim about where the laptop is; keep them in the same area as the AIS window so ranges and bearings stay plausible. height_m is the camera height above the TABLE in scaled metres: measure the real height in cm and multiply by 20 (a camera 8 cm above the table is 1.6 m -- unrealistically low for a coastal mast, so raise the camera on books until the scaled height is 15-30 m, or the horizon geometry will not resemble a coastal camera at all). yaw_deg_true is the boresight compass bearing. yaw_uncertainty_deg is 12.0 and NOT 5.0 on purpose: a phone compass indoors sits inside a steel-framed building next to a laptop, a monitor and mains wiring, and 5 degrees is a number you have not earned. If you can survey the boresight against a known reference instead, drop it to 3.0 and say how you measured it. This number floors every bearing sigma in the run and therefore caps every SPOOF confidence -- inflating it is the single easiest way to fake a good demo, so do not."
+}

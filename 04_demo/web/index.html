@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Maritime Approaches — Watch Picture</title>
+<style>
+  :root{
+    --bg:#0b1015; --panel:#121a22; --line:#1f2c38; --ink:#dce6ef; --dim:#7d92a5;
+    --match:#3f7d5c; --dark:#c9803a; --spoof:#c2453f; --unknown:#5a6b7c;
+    --accent:#4a9fd8;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  header{display:flex;align-items:baseline;gap:16px;padding:10px 16px;
+         border-bottom:1px solid var(--line);background:var(--panel)}
+  header h1{font-size:14px;margin:0;letter-spacing:.08em;text-transform:uppercase}
+  .mode{font-size:11px;padding:2px 8px;border:1px solid var(--accent);
+        color:var(--accent);border-radius:2px}
+  .caveat{margin-left:auto;font-size:11px;color:var(--dim);max-width:46ch;text-align:right}
+  main{display:grid;grid-template-columns:minmax(420px,1fr) minmax(380px,520px);
+       gap:1px;background:var(--line);height:calc(100vh - 46px)}
+  section{background:var(--bg);overflow:auto;padding:12px}
+  h2{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim);
+     margin:0 0 10px}
+  svg{width:100%;height:auto;background:#080d11;border:1px solid var(--line)}
+  .row{border:1px solid var(--line);border-left-width:3px;padding:8px 10px;
+       margin-bottom:6px;cursor:pointer;background:var(--panel)}
+  .row:hover{border-color:var(--accent)}
+  .row.sel{border-color:var(--accent);background:#16222c}
+  .row .top{display:flex;gap:10px;align-items:baseline}
+  .rank{color:var(--dim);width:2ch}
+  .label{font-weight:700;letter-spacing:.06em}
+  .MATCH{color:var(--match)} .DARK{color:var(--dark)}
+  .SPOOF{color:var(--spoof)} .UNKNOWN{color:var(--unknown)}
+  .row.MATCH{border-left-color:var(--match)} .row.DARK{border-left-color:var(--dark)}
+  .row.SPOOF{border-left-color:var(--spoof)} .row.UNKNOWN{border-left-color:var(--unknown)}
+  .meta{color:var(--dim);font-size:11px;margin-top:3px}
+  .tag{font-size:10px;padding:1px 5px;border:1px solid currentColor;border-radius:2px}
+  .defer{color:var(--dark)} .send{color:var(--accent)}
+  .bars{display:flex;gap:2px;margin-top:6px;height:4px}
+  .bars i{display:block;height:100%;background:var(--accent);opacity:.65}
+  #ev{white-space:pre-wrap}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;font-size:12px}
+  .kv b{color:var(--dim);font-weight:400}
+  table{width:100%;border-collapse:collapse;font-size:11px;margin:8px 0}
+  th,td{text-align:left;padding:3px 6px;border-bottom:1px solid var(--line)}
+  th{color:var(--dim);font-weight:400}
+  .lim{color:var(--dim);font-size:11px;border-left:2px solid var(--line);
+       padding-left:8px;margin-top:4px}
+  .score{margin-top:10px;padding:8px;border:1px solid var(--line);font-size:11px}
+  .ok{color:var(--match)} .bad{color:var(--spoof)}
+</style>
+</head>
+<body>
+<header>
+  <h1>Maritime Approaches</h1>
+  <span class="mode" id="mode">—</span>
+  <span id="counts" style="color:var(--dim);font-size:11px"></span>
+  <span class="caveat" id="caveat"></span>
+</header>
+<main>
+  <section>
+    <h2>Plan view — camera, field of view, claims and contacts</h2>
+    <svg id="plan" viewBox="0 0 1000 700" preserveAspectRatio="xMidYMid meet"></svg>
+    <div class="meta" style="margin-top:8px">
+      Wedge = camera field of view. Hollow ring = AIS claim. Filled = observed contact.
+      A ring with no fill inside the wedge is a claim nothing was seen at.
+    </div>
+    <div id="scoring"></div>
+  </section>
+  <section>
+    <h2>Ranked — which contact is worth the patrol boat</h2>
+    <div id="list"></div>
+    <h2 style="margin-top:16px">Evidence record</h2>
+    <div id="ev">Select a contact.</div>
+  </section>
+</main>
+<script>
+// ---------------------------------------------------------------------------
+// No framework, no CDN. The demo has to run with the wifi off.
+// ---------------------------------------------------------------------------
+let DATA=null, SEL=null;
+
+async function poll(){
+  try{
+    const r = await fetch('/api/state'); DATA = await r.json();
+    render();
+  }catch(e){ document.getElementById('counts').textContent='server unreachable'; }
+}
+
+// Local equirectangular projection. Over a few kilometres the distortion is far below
+// the pixel size, and it avoids a mapping library the venue wifi cannot deliver.
+function makeProjection(pts){
+  const lats=pts.map(p=>p.lat), lons=pts.map(p=>p.lon);
+  let la0=(Math.min(...lats)+Math.max(...lats))/2, lo0=(Math.min(...lons)+Math.max(...lons))/2;
+  const k=Math.cos(la0*Math.PI/180);
+  let sx=[],sy=[];
+  for(const p of pts){ sx.push((p.lon-lo0)*k); sy.push(p.lat-la0); }
+  const spanx=Math.max(...sx)-Math.min(...sx)||1e-4, spany=Math.max(...sy)-Math.min(...sy)||1e-4;
+  const pad=70, W=1000, H=700;
+  const s=Math.min((W-2*pad)/spanx,(H-2*pad)/spany);
+  return (lat,lon)=>[W/2+((lon-lo0)*k)*s, H/2-((lat-la0))*s];
+}
+
+function render(){
+  if(!DATA) return;
+  const c=DATA.counts||{};
+  document.getElementById('mode').textContent=(DATA.mode||'replay').toUpperCase();
+  document.getElementById('counts').textContent =
+    `${c.tracks} claims · ${c.contacts} contacts · ${c.matched} matched · `+
+    `${c.dark_candidates} unclaimed · ${c.unobserved_claims} unobserved`;
+  document.getElementById('caveat').textContent = DATA.caveat||'';
+  drawPlan(); drawList(); drawScoring();
+  if(SEL) drawEvidence(SEL);
+}
+
+function drawPlan(){
+  const svg=document.getElementById('plan'); svg.innerHTML='';
+  const pose=DATA.pose, recs=DATA.records||[];
+  const pts=[{lat:pose.lat_deg,lon:pose.lon_deg}];
+  for(const r of recs){ if(r.ais_track) pts.push({lat:r.ais_track.claimed_lat_deg,lon:r.ais_track.claimed_lon_deg}); }
+  for(const i of (DATA.infrastructure||[])) pts.push({lat:i.lat,lon:i.lon});
+  if(DATA.asset) pts.push({lat:DATA.asset.lat,lon:DATA.asset.lon});
+  const P=makeProjection(pts);
+  const N=(t,a)=>{const e=document.createElementNS('http://www.w3.org/2000/svg',t);
+    for(const k in a)e.setAttribute(k,a[k]);svg.appendChild(e);return e;};
+
+  const [cx,cy]=P(pose.lat_deg,pose.lon_deg);
+  // Field-of-view wedge. Drawn first so everything else sits on top of it.
+  const half=pose.fov_half_angle_deg||pose.hfov_deg/2, br=pose.boresight_deg_true;
+  const pxPerM=(()=>{const [x1]=P(pose.lat_deg,pose.lon_deg);
+    const [x2]=P(pose.lat_deg,pose.lon_deg+0.01);
+    return Math.abs(x2-x1)/(0.01*111320*Math.cos(pose.lat_deg*Math.PI/180));})();
+  const R=pose.max_range_m*pxPerM;
+  const pt=(a,r)=>[cx+r*Math.sin(a*Math.PI/180), cy-r*Math.cos(a*Math.PI/180)];
+  const [ax,ay]=pt(br-half,R), [bx,by]=pt(br+half,R);
+  N('path',{d:`M${cx},${cy} L${ax},${ay} A${R},${R} 0 0 1 ${bx},${by} Z`,
+    fill:'#4a9fd8',opacity:.07,stroke:'#4a9fd8','stroke-opacity':.35});
+
+  for(const i of (DATA.infrastructure||[])){
+    const [x,y]=P(i.lat,i.lon);
+    N('rect',{x:x-5,y:y-5,width:10,height:10,fill:'none',stroke:'#7d92a5','stroke-width':1.2,transform:`rotate(45 ${x} ${y})`});
+    N('text',{x:x+9,y:y+4,fill:'#7d92a5','font-size':10}).textContent=i.id;
+  }
+  if(DATA.asset){ const [x,y]=P(DATA.asset.lat,DATA.asset.lon);
+    N('circle',{cx:x,cy:y,r:6,fill:'#4a9fd8'});
+    N('text',{x:x+10,y:y+4,fill:'#4a9fd8','font-size':10}).textContent='PATROL';
+  }
+  N('circle',{cx:cx,cy:cy,r:5,fill:'#dce6ef'});
+  N('text',{x:cx+9,y:cy+4,fill:'#dce6ef','font-size':10}).textContent='CAMERA';
+
+  const COL={MATCH:'#3f7d5c',DARK:'#c9803a',SPOOF:'#c2453f',UNKNOWN:'#5a6b7c'};
+  for(const r of recs){
+    const col=COL[r.verdict.label]||'#5a6b7c';
+    const sel=SEL&&SEL.record_id===r.record_id;
+    if(r.ais_track){
+      const [x,y]=P(r.ais_track.claimed_lat_deg,r.ais_track.claimed_lon_deg);
+      const g=N('circle',{cx:x,cy:y,r:sel?9:7,fill:'none',stroke:col,'stroke-width':sel?2.5:1.6});
+      g.style.cursor='pointer'; g.onclick=()=>{SEL=r;render();};
+    }
+    // A contact is a bearing from the camera. Drawing the ray is the honest picture:
+    // the tool knows the direction well and the distance badly.
+    if(r.eo_contact){
+      const b=r.eo_contact.observed_bearing_deg_true;
+      const rm=(r.eo_contact.observed_range_m||pose.max_range_m*0.6)*pxPerM;
+      const [x,y]=pt(b,rm);
+      N('line',{x1:cx,y1:cy,x2:x,y2:y,stroke:col,'stroke-width':sel?1.6:0.8,'stroke-opacity':sel?.9:.35});
+      const g=N('circle',{cx:x,cy:y,r:sel?6:4,fill:col});
+      g.style.cursor='pointer'; g.onclick=()=>{SEL=r;render();};
+    }
+  }
+}
+
+function drawList(){
+  const el=document.getElementById('list'); el.innerHTML='';
+  for(const r of (DATA.records||[])){
+    const v=r.verdict, p=r.priority;
+    const d=document.createElement('div');
+    d.className='row '+v.label+(SEL&&SEL.record_id===r.record_id?' sel':'');
+    const id=r.identity_claimed.claimed_mmsi||'— no AIS claim —';
+    const sub=v.spoof_subtype?` / ${v.spoof_subtype}`:'';
+    d.innerHTML=
+      `<div class="top"><span class="rank">${p.rank}</span>`+
+      `<span class="label ${v.label}">${v.label}${sub}</span>`+
+      `<span style="color:var(--dim)">conf ${v.confidence.toFixed(2)}</span>`+
+      `<span style="margin-left:auto">prio ${p.score.toFixed(2)}</span></div>`+
+      `<div class="meta">MMSI ${id}`+
+      (r.bearing_deg_true!=null?` · brg ${r.bearing_deg_true.toFixed(1)}°`:'')+
+      (r.range_nm!=null?` · ${r.range_nm.toFixed(2)} NM`:' · range unknown')+
+      (p.time_to_intercept_min!=null?` · ${p.time_to_intercept_min.toFixed(0)} min out`:'')+
+      `</div>`+
+      `<div class="meta">`+
+      (v.defer_to_human?`<span class="tag defer">DEFER TO HUMAN</span> `:'')+
+      (p.scarce_asset_recommended?`<span class="tag send">RECOMMEND ASSET</span>`:'')+
+      `</div>`+
+      `<div class="bars">`+
+      Object.entries(p.component_scores).map(([k,val])=>
+        `<i title="${k} ${val.toFixed(2)} x weight ${p.component_weights[k]}" style="width:${
+          Math.max(2,val*p.component_weights[k]*300)}px"></i>`).join('')+
+      `</div>`;
+    d.onclick=()=>{SEL=r;render();};
+    el.appendChild(d);
+  }
+}
+
+function drawEvidence(r){
+  const v=r.verdict, p=r.priority;
+  let h=`<div class="kv">`+
+    `<b>record</b><span>${r.record_id}</span>`+
+    `<b>verdict</b><span class="${v.label}">${v.label}${v.spoof_subtype?' / '+v.spoof_subtype:''} — confidence ${v.confidence.toFixed(2)}</span>`+
+    `<b>decided</b><span>${v.decided_at_utc}</span>`+
+    `<b>ruleset</b><span>${v.ruleset_version}</span>`+
+    `<b>pipeline</b><span>${r.pipeline_version}</span></div>`;
+
+  h+=`<h2 style="margin-top:12px">Claimed identity</h2><div class="kv">`+
+     Object.entries(r.identity_claimed).map(([k,val])=>
+       `<b>${k.replace('claimed_','')}</b><span>${val??'—'}</span>`).join('')+
+     `</div><div class="lim">These are CLAIMS made by a transponder. This tool never asserts a vessel's identity.</div>`;
+
+  if(r.mismatches.length){
+    h+=`<h2 style="margin-top:12px">Claimed vs observed</h2><table><tr>`+
+       `<th>dimension</th><th>claimed</th><th>observed</th><th>Δ</th><th>σ</th><th>severity</th></tr>`+
+       r.mismatches.map(m=>`<tr><td>${m.dimension}</td><td>${m.claimed_value} ${m.unit==='class_label'?'':m.unit}</td>`+
+       `<td>${m.observed_value} ${m.unit==='class_label'?'':m.unit}</td><td>${m.delta??'—'}</td>`+
+       `<td>${m.significance.toFixed(1)}</td><td>${m.severity}${m.explained_by_staleness?' (stale)':''}</td></tr>`).join('')+
+       `</table>`;
+  }
+
+  h+=`<h2 style="margin-top:12px">Priority — rank ${p.rank}, score ${p.score.toFixed(2)}</h2><table><tr><th>component</th><th>score</th><th>weight</th><th>contribution</th></tr>`+
+     Object.entries(p.component_scores).map(([k,val])=>
+       `<tr><td>${k}</td><td>${val.toFixed(2)}</td><td>${p.component_weights[k]}</td>`+
+       `<td>${(val*p.component_weights[k]).toFixed(3)}</td></tr>`).join('')+`</table>`+
+     `<div class="lim">The weights are the argument. A score with no components is not a defensible recommendation.</div>`;
+
+  h+=`<h2 style="margin-top:12px">Rationale</h2><div style="font-size:12px">${r.rationale_text}</div>`+
+     `<div class="lim">source: ${r.rationale_model}</div>`;
+
+  h+=`<h2 style="margin-top:12px">Limitations</h2>`+
+     r.limitations.map(l=>`<div class="lim">${l}</div>`).join('');
+
+  document.getElementById('ev').innerHTML=h;
+}
+
+function drawScoring(){
+  const s=DATA.scoring, el=document.getElementById('scoring');
+  if(!s){ el.innerHTML=''; return; }
+  const d=s.detection,k=s.controls;
+  el.innerHTML=`<div class="score"><b>Measured against known ground truth</b><br>`+
+    `detection: <span class="ok">${d.hit}/${d.total}</span> injected faults labelled correctly<br>`+
+    `false positives: <span class="${k.false_positives?'bad':'ok'}">${k.false_positives}/${k.total}</span> on cases that must stay silent<br>`+
+    `<span style="color:var(--dim)">The second number is the one that decides whether a watch officer keeps using this.</span></div>`;
+}
+
+poll(); setInterval(poll,2000);
+</script>
+</body>
+</html>

@@ -50,12 +50,11 @@ THE INFERENCE CHAIN THIS MODULE CONTRIBUTES
         contacts is a pose bug, not a detector bug — check camera_pose_ref first.
         A failure on only the distant contacts is an optics/pixel-extent problem.
 
-RELOCATION NOTE
-CameraPose and the pinhole bearing helpers live here for now. They belong in
-geometry.py once that file exists (same lane, no ownership conflict). They are here
-rather than there because EoContact.observed_bearing_deg_true is a REQUIRED field —
-this module cannot emit a legal contact without them, and writing geometry.py ahead of
-its own task would be speculative.
+WHERE THE CAMERA MODEL LIVES
+CameraPose and the pinhole bearing helpers are in geometry.py, imported below. This
+module owns the DETECTOR and the contract boundary; geometry.py owns the optics. If a
+bearing looks wrong, the arithmetic is in geometry.py and the pose that fed it is in
+this module's run manifest.
 
 IMPORT CONVENTION
 Flat imports with 03_src on sys.path — see LIBRARIES.md. `03_src` begins with a digit
@@ -67,7 +66,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import statistics
 import sys
 import time
@@ -81,6 +79,13 @@ import numpy as np
 from ultralytics import YOLO
 
 from contracts import EoContact
+from geometry import (
+    CameraPose,
+    bearing_uncertainty_deg,
+    relative_bearing_deg,
+    true_bearing_deg,
+    uncalibrated_benchmark_pose,
+)
 
 # --------------------------------------------------------------------------------
 # Constants. Every assumed (as opposed to measured) number is named here rather than
@@ -120,125 +125,16 @@ IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
 
 
 # --------------------------------------------------------------------------------
-# Camera pose. Not a contracts.py type: EoContact carries only camera_pose_ref, a
-# string. The pose itself is lane B's internal state, written to the run manifest so
-# that the ref resolves to something a judge can inspect. A bearing is only as
-# trustworthy as the pose that produced it, and criterion 4 means the pose must be
-# recoverable after the fact.
-# --------------------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class CameraPose:
-    """Where the camera was and which way it faced. Frozen: a pose that can change
-    after the frames were captured is not evidence."""
-
-    pose_ref: str                  # goes into EoContact.camera_pose_ref verbatim
-    yaw_deg_true: float            # boresight azimuth, degrees TRUE, 0-360 clockwise
-    hfov_deg: float                # horizontal field of view of the full frame
-    yaw_uncertainty_deg: float     # 1-sigma error on yaw_deg_true
-
-    # Position is not used by this module, but without it the pose cannot later
-    # produce a range or a cable-proximity check, and camera_pose_ref would point at
-    # an incomplete record. Optional so a pure throughput benchmark need not lie
-    # about where it stood.
-    lat_deg: float | None = None
-    lon_deg: float | None = None
-    height_m: float | None = None
-    note: str | None = None
-
-    @staticmethod
-    def from_json_file(path: str | Path) -> "CameraPose":
-        with open(path, "r", encoding="utf-8") as fh:
-            raw = json.load(fh)
-        return CameraPose(**raw)
-
-
-def uncalibrated_benchmark_pose(hfov_deg: float) -> CameraPose:
-    """A pose for measuring throughput when no surveyed pose exists yet.
-
-    yaw_uncertainty_deg is 180.0 ON PURPOSE. That makes every bearing this run
-    produces explicitly worthless — a 1-sigma of 180 degrees cannot support any
-    position mismatch at any significance — so the run is usable for FPS and
-    detection counts and structurally unusable as evidence. The alternative, a
-    plausible-looking default of 2 degrees, is how an uncalibrated bearing reaches a
-    verdict without anyone noticing.
-    """
-    return CameraPose(
-        pose_ref="UNCALIBRATED-BENCHMARK",
-        yaw_deg_true=0.0,
-        hfov_deg=hfov_deg,
-        yaw_uncertainty_deg=180.0,
-        note="Throughput measurement only. Bearings from this pose are not evidence.",
-    )
-
-
-# --------------------------------------------------------------------------------
-# Pinhole bearing maths.
+# Camera pose and the pinhole bearing maths now live in geometry.py, as handoff_B.md
+# said they would. Same lane, so this is a pure relocation, not a handover. They moved
+# because geometry.py also needs them for waterline ranging, and two copies of a
+# camera model is two chances for a bearing to be quietly wrong.
 #
-# LIBRARY-FIRST justification (LIBRARIES.md requires one line): this is single-axis
-# rectilinear projection, one atan2 call. pyproj.Geod solves geodesy between two
-# geographic points, which is a different problem; no library in the register covers
-# pixel-to-angle for a camera. Written here, deliberately, in four lines.
+# Behaviour here is unchanged: geometry.CameraPose adds pitch/roll/height fields that
+# all default to the level, unrolled, height-unknown camera this module already
+# assumed, and relative_bearing_deg falls back to the identical level-camera formula
+# when no attitude is supplied.
 # --------------------------------------------------------------------------------
-
-def focal_length_px(image_width_px: int, hfov_deg: float) -> float:
-    """Focal length in pixels implied by a frame width and a horizontal FOV."""
-    return (image_width_px / 2.0) / math.tan(math.radians(hfov_deg) / 2.0)
-
-
-def relative_bearing_deg(centre_x_px: float, image_width_px: int, hfov_deg: float) -> float:
-    """Signed angle from boresight to a pixel column. Positive to the right.
-
-    WHY atan2 AND NOT LINEAR INTERPOLATION ACROSS THE FRAME: a rectilinear lens does
-    not map angle linearly onto pixels. On a wide lens (a MacBook camera is wide) the
-    linear approximation is several degrees wrong at the frame edges, and it is wrong
-    in a direction that fakes a consistent bearing bias — which reads downstream as a
-    position spoof rather than as our own arithmetic.
-    """
-    dx = centre_x_px - (image_width_px / 2.0)
-    return math.degrees(math.atan2(dx, focal_length_px(image_width_px, hfov_deg)))
-
-
-def true_bearing_deg(yaw_deg_true: float, rel_deg: float) -> float:
-    """Boresight azimuth plus relative bearing, wrapped into contracts.py's 0-360."""
-    return (yaw_deg_true + rel_deg) % 360.0
-
-
-def bearing_uncertainty_deg(
-    bbox_width_px: float,
-    centre_x_px: float,
-    image_width_px: int,
-    hfov_deg: float,
-    yaw_uncertainty_deg: float,
-) -> float:
-    """1-sigma half-width on observed_bearing_deg_true.
-
-    Two independent error sources, combined in quadrature because they are
-    independent: they do not simply add.
-
-      1. POSE. Yaw error rotates every bearing in the run by the same amount. It is
-         usually the dominant term and it is systematic, not random.
-      2. CENTROID. Where inside the box the hull's centre actually is. Converted from
-         pixels to degrees using the LOCAL angular scale d(theta)/dx = f/(f^2+dx^2),
-         not the frame-average scale — a pixel near the frame edge subtends less
-         angle than a pixel at the centre, and using the average would overstate the
-         precision of centre contacts and understate that of edge contacts.
-
-    Without this number a position mismatch is meaningless: contracts.py scores
-    significance in sigmas, and a sigma of zero makes every delta infinitely
-    significant.
-    """
-    f = focal_length_px(image_width_px, hfov_deg)
-    dx = centre_x_px - (image_width_px / 2.0)
-    deg_per_px_here = math.degrees(f / (f * f + dx * dx))
-
-    centroid_sigma_px = max(
-        BBOX_CENTROID_SIGMA_FRACTION * bbox_width_px, BBOX_CENTROID_SIGMA_FLOOR_PX
-    )
-    centroid_sigma_deg = centroid_sigma_px * deg_per_px_here
-
-    return math.sqrt(yaw_uncertainty_deg ** 2 + centroid_sigma_deg ** 2)
-
 
 # --------------------------------------------------------------------------------
 # Pending-contract guard.
@@ -521,6 +417,8 @@ class EoDetector:
                 bearing_uncertainty_deg=bearing_uncertainty_deg(
                     bbox_width_px, centre_x_px, image_width_px,
                     self.pose.hfov_deg, self.pose.yaw_uncertainty_deg,
+                    centroid_sigma_fraction=BBOX_CENTROID_SIGMA_FRACTION,
+                    centroid_sigma_floor_px=BBOX_CENTROID_SIGMA_FLOOR_PX,
                 ),
                 observed_bearing_rel_deg=rel_deg,
 

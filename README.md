@@ -60,18 +60,21 @@ compare it to what the camera did see, and quantify the disagreement.*
                  Association                 <- pairing only. NEVER judges honesty.
                        |
                        v
-               consistency.py           "does the pair agree?"   [NOT WRITTEN]
+               consistency.py           "does the pair agree?"
                per-dimension claimed vs observed -> Mismatch[]
                        |
                        v
-                 verdict.py             MATCH / DARK / SPOOF / UNCERTAIN  [NOT WRITTEN]
+                 verdict.py             MATCH / DARK / SPOOF / UNKNOWN
                  deterministic. confidence. defer_to_human.
                        |
                        v
-               prioritizer.py           rank contacts against one scarce asset  [NOT WRITTEN]
+               prioritizer.py           rank against ONE scarce asset
                        |
                        v
-               evidence.py + report.py  the case file  [NOT WRITTEN]
+               evidence.py              the case file
+                       |
+                       v
+               app.py                   the operator screen (stdlib, offline)
 ```
 
 ## 4. How each verdict is actually reached
@@ -117,7 +120,87 @@ The `Verdict` type carries `defer_to_human: bool` and `defer_reasons: list`. Sta
 an uncalibrated camera pose, an ambiguous assignment, a claim outside the field of view,
 `ship_type == "unknown"` — each suppresses the comparison rather than guessing.
 
-## 5. Get the data
+## 5. Techniques, and the case for each
+
+Every technique here was chosen against a named alternative. If a decision has no
+alternative it could have gone the other way on, it is not a decision and it is not
+listed.
+
+### 5.1 Is AI required? No. Is it useful? In exactly one place.
+
+Take the inventory honestly. Of the eight stages in the pipeline, **six contain no model
+of any kind** and never did:
+
+| Stage | Technique | AI? |
+|---|---|---|
+| AIS ingest | pandas, chunked streaming, explicit `dd/mm/yyyy` parse, dedupe | none |
+| Detection | MOG2 background subtraction + connected components (`pi_sensor.py`) | **none** |
+| Bearing | `atan2` pinhole model | none |
+| Range | waterline depression angle, `h / tan(d)` | none |
+| Association | geodesics, dead reckoning, chi-square residual, Jonker–Volgenant | none |
+| Consistency | arithmetic on two measurements and a stated uncertainty | none |
+| Verdict | thresholds in sigmas + rules | none |
+| Prioritization | weighted sum of five measured components | none |
+| Evidence | string template over the record | none |
+
+AI is genuinely useful in **one** place: assigning a silhouette class (is that a tanker
+or a tug?), which a VLM does well and geometry does badly. That single capability powers
+one of the four spoof dimensions. **Length, heading and position spoofing all work with
+zero AI**, and so does the entire dark-vessel path.
+
+There is a second, optional use — an LLM writing a nicer rationale sentence — but
+`evidence.py` produces a complete, quotable rationale from a deterministic template with
+no model, no network and no API key. The LLM is a presentation upgrade, never a
+dependency.
+
+**And the no-AI path is not the poor relation.** Three reasons it is the better default
+here:
+
+1. **It works on what we are actually pointing the camera at.** The indoor demo uses toy
+   boats and printed silhouettes. COCO's `boat` class may not fire on a paper cut-out —
+   that was the single identified risk that could kill the live segment. Background
+   subtraction does not care what the object *is*; it sees a thing that was not there
+   before, against a background that never moves.
+2. **It is defensible as evidence.** "A connected region of 340 px, above the fitted
+   waterline, aspect 2.8, persisting 14 frames, at these thresholds" survives a
+   courtroom. "A network assigned 0.87" does not. Criterion 4 asks for evidence-grade
+   output; an explainable detector is *structurally* better at it.
+3. **It runs on the sensor.** Classical CV does 30 FPS on a Raspberry Pi. YOLOv8n does a
+   few.
+
+### 5.2 The decision register
+
+| Decision | Rejected alternative | Why |
+|---|---|---|
+| Claimed and observed are **separate frozen types** | one `Vessel` object holding both | With one object, someone eventually writes `contact.length = claim.length` and the spoof detector compares a number to itself — reporting perfect agreement forever, silently. The wall makes that a crash. |
+| Compare in **sigmas** | thresholds in metres/degrees | A 200 m gap at 8 km with a 2° pose error is noise; at 800 m it is a lie. A metre threshold gets both wrong, quietly. |
+| Range from **waterline depression** | range from apparent size | Apparent size needs an assumed length. If range came from assumed length, `observed_length` collapses to the claim and the length check **can never fire**. The detector would run, report nothing, and look healthy. |
+| Position tested **cross-range only** | pooled position error | At 5 km: bearing error 218 m, monocular range error 1250 m. Pooling them buries a 4.6σ signal at 0.79σ. A monocular sensor measures direction well and distance badly; averaging the two throws away the good measurement. |
+| **Jonker–Volgenant** global assignment | greedy nearest-neighbour | Greedy pairs the first contact to the nearest claim and cascades errors down the list. In a dense lane that reorders half the scene. |
+| Association **never judges honesty** | reject implausible pairs during matching | A spoofer is exactly where it says it is, so it pairs perfectly. Filtering "wrong-looking" pairs would discard the spoof before anything could examine it. |
+| Deterministic **rationale template** by default | always call the LLM | Works offline, cannot hallucinate a fact absent from the record, and keeps the whole project runnable with no AI. |
+| **Classical CV** on the sensor | YOLOv8n | See 5.1 — kill-risk, explainability, frame rate. |
+| Confidence **saturates at 0.97** | allow 1.0 | The tool cannot exclude a systematic error it does not know about; a mis-surveyed pose rotates every bearing equally and looks exactly like confidence. The ceiling is a statement about the method. |
+| Deferred verdicts are **damped, not dropped** | hide low-confidence findings | Hiding the uncertain cases from the operator is the opposite of criterion 4. |
+| Prioritizer includes an **actionability** term | rank by severity alone | A 9σ spoofer two hours away ranks below a 5σ loiterer six miles out. Suspicion is a property of a contact; priority is a property of a contact, an asset and a clock. |
+| Web app is **stdlib + zero network** | FastAPI + Leaflet | A demo that needs `pip install` or a CDN is one venue-wifi failure from not existing. |
+
+### 5.3 Dead logic found and removed
+
+The D0 harness exists to catch code that looks like diligence and does nothing. It has
+already found two such cases in this repo, both invisible to any test that only checks
+for crashes:
+
+- **The class check could never fire.** Significance used the normal quantile, mapping
+  0.92 confidence to 1.41σ — permanently below the 2.0 reporting threshold. The check
+  ran on every pair, cost time, and was mathematically incapable of producing a finding.
+  Replaced with log-odds (`ln(p/(1-p))`), the natural scale for evidence.
+- **The position check could never detect a position spoof.** See 5.2, row 4.
+
+Both were found by injecting a *known* fault and noticing it did not come back. That is
+the argument for the harness in one sentence.
+
+## 6. Get the data
 
 **Source:** Danish Maritime Authority bulk AIS. Free, governmental, Baltic, no rate limit.
 The bucket name contains dots, so **virtual-hosted HTTPS breaks against the wildcard cert**
@@ -150,7 +233,7 @@ for honest limits.
 `02_data/INVENTORY.md` records every measured number about the real data. Read it instead
 of downloading, if you only need to understand.
 
-## 6. Five properties of the real AIS data that will silently corrupt your results
+## 7. Five properties of the real AIS data that will silently corrupt your results
 
 Measured on the Fehmarn Belt slice, not assumed. All five are handled in `ais_ingest.py`.
 
@@ -168,7 +251,7 @@ Measured on the Fehmarn Belt slice, not assumed. All five are handled in `ais_in
 5. **Timestamps are dd/mm/yyyy.** pandas defaults to month-first and mis-parses every date
    with day <= 12 **without raising**. One parse site, explicit format.
 
-## 7. Module status
+## 8. Module status
 
 | File | Owner | Lines | State |
 |---|---|---|---|
@@ -176,16 +259,38 @@ Measured on the Fehmarn Belt slice, not assumed. All five are handled in `ais_in
 | `ais_ingest.py` | A | 851 | Done. 24 tests, one per silent-failure mode |
 | `eo_detector.py` | B | 888 | Done. Bearing maths unit-verified; FPS measured 45 on M4 |
 | `association.py` | C | 686 | Done. Geometry only |
-| `consistency.py` | C | 0 | **Empty — criterion 3 lives here** |
-| `verdict.py` | D | 0 | **Empty** |
-| `prioritizer.py` | D | 0 | **Empty — criterion 2, where most teams fail** |
-| `evidence.py` / `report.py` | D | 0 | **Empty — criterion 4** |
+| `consistency.py` | C | 529 | Done. Per-dimension claimed-vs-observed, in sigmas |
+| `verdict.py` | D | 409 | Done. MATCH/DARK/SPOOF/UNKNOWN + calibrated confidence |
+| `prioritizer.py` | D | 339 | Done. Weighted ranking incl. actionability |
+| `evidence.py` | D | 256 | Done. Case file + deterministic rationale, no model |
 | `geometry.py` | B | 0 | Empty; `association.py` has a temporary local copy of `_shortest_arc_deg` |
 
 `03_src` starts with a digit, so it is not a legal Python package name. Imports are flat
 via `sys.path` — see `tests/conftest.py`.
 
-## 8. What this is not
+## 9. Run the demo — two commands, no downloads
+
+A fully synthetic 8-vessel scenario is committed, so this works on a fresh clone:
+
+```bash
+python 04_demo/make_synthetic_eo.py --ais 04_demo/demo_scenario.csv --out 04_demo/out/scene01
+python 04_demo/run_pipeline.py --scene 04_demo/out/scene01
+python 04_demo/app.py --scene 04_demo/out/scene01     # then open http://127.0.0.1:8000
+```
+
+The app is Python standard library only and the page loads nothing from the network —
+no CDN, no map tiles, no fonts. It runs with the wifi off, which at a hackathon venue is
+not a nicety.
+
+**The sensor node** (`04_demo/pi_sensor.py`) runs on a Raspberry Pi with a camera module
+and needs only `opencv-python` and `numpy`. It detects hulls with background subtraction
+and connected components — **no neural network** — computes bearing through the same
+pinhole model and range from the waterline depression angle, and POSTs EoContact JSON to
+the app. It has no AIS connection at all, which is the claimed/observed wall made
+physical: it cannot leak an identity into an observation because it has never been told
+one.
+
+## 10. What this is not
 
 - **Not automated enforcement.** It ranks and evidences. A human decides. Nothing here
   determines intent, and nothing here should ever be wired to an actuator.

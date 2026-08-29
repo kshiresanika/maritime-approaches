@@ -28,6 +28,7 @@ Summary, so nobody has to go looking before a commit:
 | DMA bulk AIS | Danish act no. 596 of 24 June 2005 (re-use of public sector information). No warranty; **no combining with other datasets to identify individuals** without Danish DPA authorisation; **redistribution not addressed**; DMA may sell AIS commercially. | **RECORDED. In use.** |
 | Copernicus / Sentinel-1 | Free, ESA/EU | Not used |
 | Live AIS aggregator (T2) | **NOT READ** | **Blocks T2.** Nothing connects until this row is filled |
+| **EEA coastline for analysis v3.0 (Mar 2017)** | **CC-BY 4.0**, copyright European Environment Agency, "no limitations to public access". Attribution REQUIRED. 1:100,000 MMU, native EPSG:3035. Lineage: EUHYDRO + GSHHG. | **RECORDED. Needed for the land-crossing check** |
 | MacBook camera | Owned | Available |
 | SeaShips / Singapore Maritime | Academic, unverified | Not used |
 
@@ -36,3 +37,9 @@ committing raw AIS rows to a public repo takes an unforced position on terms tha
 never granted. Lane A's ruling: **only pseudonymised golden windows are committed**
 (`INVENTORY.md` §6). If a pitch slide is going to claim an open licence, get it from
 DMA in writing first.
+
+**The EEA coastline is the only dataset here with explicit, permissive reuse terms.**
+Download: https://sdi.eea.europa.eu/data/9faa6ea1-372a-4826-a3c7-fb5b05e31c52 — unlike the
+DMA AIS it can be cited on a slide without hedging, provided the EEA is credited. Do not
+substitute a coarse coastline: see `02_data/INVENTORY.md` §4.11 for why a 1:110m dataset
+would flag every vessel near Rødbyhavn and Puttgarden as sailing overland.

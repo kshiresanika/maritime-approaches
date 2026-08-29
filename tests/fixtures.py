@@ -112,6 +112,7 @@ def make_eo_contact(seed: int = 0, **overrides) -> EoContact:
         bbox_px=(320, 210, 760, 340),
         observed_bearing_deg_true=round(rng.uniform(0.0, 359.9), 1),
         bearing_uncertainty_deg=round(rng.uniform(0.3, 2.5), 2),
+        detection_confidence=round(rng.uniform(0.45, 0.97), 2),
         observed_range_m=rng_m,
         # Range error grows with range; ~12% is an honest placeholder for a
         # monocular estimate and keeps significance calculations meaningful.
