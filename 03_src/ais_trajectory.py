@@ -303,6 +303,9 @@ def build_trajectories(
         return mpd.TrajectoryCollection([])
 
     points = points.sort_values(["track_id", "t"]).reset_index(drop=True)
+    # UTC in. movingpandas will strip the zone regardless; coercing here means the
+    # zone it strips is known, so `_utc()` can restore it exactly on the way out.
+    points["t"] = _utc(points["t"])
     counts = points.groupby("track_id")["t"].transform("size")
     points = points[counts >= min_points]
     if points.empty:
@@ -356,7 +359,9 @@ def implied_kinematics_table(collection: mpd.TrajectoryCollection) -> pd.DataFra
         frame = traj.df
         rows.append(pd.DataFrame({
             "track_id": traj.id,
-            "report_time_utc": frame.index,
+            # Re-labelled UTC: movingpandas dropped the zone when it built the
+            # trajectory, and this column's name promises it back.
+            "report_time_utc": _utc(pd.DatetimeIndex(frame.index)),
             "implied_speed_ms": frame.get("implied_speed_ms"),
             "implied_course_deg_true": frame.get("implied_course_deg_true"),
             "gap_before_s": frame["report_delta"].dt.total_seconds()
@@ -422,6 +427,43 @@ def pairwise_distance_m(
     return a.distance(b, align=False)
 
 
+# --------------------------------------------------------------------------------
+# The movingpandas timezone boundary.
+# --------------------------------------------------------------------------------
+
+def _utc(value):
+    """
+    Force a timestamp, datetime or Series onto tz-aware UTC.
+
+    WHY THIS EXISTS. movingpandas strips the timezone from every trajectory it
+    builds — `df.tz_localize(None)`, movingpandas/trajectory.py, which raises
+    TimeZoneWarning as it does so. So a timestamp read back out of a
+    TrajectoryCollection is NAIVE, while the flat point table it was built from is
+    tz-aware datetime64[ns, UTC]. pandas refuses to compare the two:
+
+        TypeError: Invalid comparison between dtype=datetime64[ns, UTC] and Timestamp
+
+    `tz_localize(None)` on a UTC value keeps the UTC wall clock and discards only
+    the label, so re-localising to UTC here is its exact inverse — nothing is
+    shifted by an offset. A naive value from anywhere else is assumed UTC, which is
+    what this module's `t` column already promises: it is populated from
+    `AisTrack.report_time_utc`.
+
+    Applied at every crossing rather than at the comparison sites, so that
+    `BehaviourEvent.t_start_utc` is genuinely UTC as its name claims, and so that
+    `_event_id` — which hashes `start.isoformat()` — cannot produce two different
+    ids for one event depending on whether the timestamp travelled through
+    movingpandas on the way.
+    """
+    if isinstance(value, pd.Series):
+        out = pd.to_datetime(value, utc=True)
+        return out
+    if isinstance(value, pd.DatetimeIndex):
+        return value.tz_localize("UTC") if value.tz is None else value.tz_convert("UTC")
+    ts = pd.Timestamp(value)
+    return ts.tz_localize("UTC") if ts.tz is None else ts.tz_convert("UTC")
+
+
 def _event_id(kind: str, track_id: str, start: datetime) -> str:
     """Deterministic id, so a re-run produces the same event ids as the evidence
     record written against the previous run."""
@@ -432,8 +474,13 @@ def _event_id(kind: str, track_id: str, start: datetime) -> str:
 def _claims_during(points: pd.DataFrame, track_id: str,
                    start: datetime, end: datetime) -> tuple[tuple[str, ...], str | None]:
     """Navigational statuses and ship type claimed during a span, most frequent first."""
+    # Both sides onto UTC before comparing. `points` is the caller's frame and
+    # `start`/`end` came out of movingpandas, so their awareness is not guaranteed
+    # to agree even after the crossings above.
+    t = _utc(points["t"])
+    start, end = _utc(start), _utc(end)
     window = points[(points["track_id"] == track_id)
-                    & (points["t"] >= start) & (points["t"] <= end)]
+                    & (t >= start) & (t <= end)]
     if window.empty:
         return (), None
     statuses = tuple(
@@ -488,7 +535,9 @@ def detect_loiter(
     events: list[BehaviourEvent] = []
     for i, (_, stop) in enumerate(stops.iterrows()):
         track_id = str(stop["traj_id"])
-        start, end = stop["start_time"], stop["end_time"]
+        # TrajectoryStopDetector reads the trajectory frame, so these come back
+        # naive. t_start_utc must not be a lie, and _event_id hashes it.
+        start, end = _utc(stop["start_time"]), _utc(stop["end_time"])
         statuses, ship_type = _claims_during(points, track_id, start, end)
         events.append(BehaviourEvent(
             event_id=_event_id("loiter", track_id, start),
@@ -572,14 +621,15 @@ def detect_gaps(
     per_track_median = kinematics.groupby("track_id")["gap_before_s"].median()
     area_median = float(kinematics["gap_before_s"].median())
 
-    ordered = points.sort_values(["track_id", "t"])
+    ordered = points.sort_values(["track_id", "t"]).copy()
+    ordered["t"] = _utc(ordered["t"])   # compared below against trajectory-derived times
     by_track = {tid: g.reset_index(drop=True) for tid, g in ordered.groupby("track_id")}
 
     # PASS 1 — locate each gap's bracketing reports. No geometry yet.
     bracketed: list[dict[str, Any]] = []
     for _, row in gaps.iterrows():
         track_id = str(row["track_id"])
-        resume_t = row["report_time_utc"]
+        resume_t = _utc(row["report_time_utc"])
         duration = float(row["gap_before_s"])
         start_t = resume_t - timedelta(seconds=duration)
 

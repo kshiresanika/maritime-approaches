@@ -106,8 +106,22 @@ body{
    viewport. minmax(0,1fr) lets the column be narrower than its content, which is what
    forces the header to wrap instead of the panes to vanish. The header's own wrapping
    rule below is the other half; either alone is not enough. */
-#app{display:grid;grid-template-rows:auto minmax(0,1fr);grid-template-columns:minmax(0,1fr);
+/* THREE CHILDREN, THREE ROWS, EACH PLACED — and the third one was missing.
+   MEASURED: in the operator layout #grid came out 1600 x 0 and the map with it. #app
+   holds THREE children (header, #sceneCaveat, #grid) and declared TWO rows, so #grid
+   landed in an IMPLICIT row, which is `auto`. In the console layout that was invisible:
+   the four panes are in normal flow, so the auto row sized itself to their content and
+   looked deliberate. In the operator layout every pane is position:absolute, the auto
+   row had nothing in flow to measure, and it collapsed to nothing.
+   Rows are now declared and every child is placed, so the layout does not depend on
+   which of them happens to be visible — #sceneCaveat is display:none until a caveat
+   exists, and a hidden grid child is REMOVED from the grid rather than collapsing its
+   row. That is the third time this exact rule has bitten this file. */
+#app{display:grid;grid-template-rows:auto auto minmax(0,1fr);grid-template-columns:minmax(0,1fr);
      height:100vh;max-width:100vw;overflow:hidden}
+#app > header{grid-row:1}
+#app > #sceneCaveat{grid-row:2}
+#app > #grid{grid-row:3;min-height:0}
 
 header{
   /* WRAPS. The status chips are a variable-length row — one of them carries a whole
@@ -260,6 +274,19 @@ header h1 .sub{color:var(--muted);font-weight:600;letter-spacing:.02em}
 #map{height:100%;width:100%;background:#070a0f}
 .leaflet-container{background:#070a0f!important;font-family:inherit}
 .leaflet-control-attribution{background:rgba(8,11,16,.9)!important;color:var(--muted)!important;font-size:11px!important}
+/* Leaflet's controls ship white-on-white. Restyled rather than hidden: the scale bar
+   is load-bearing (the hull marks are drawn to observed length) and a white slab in
+   the corner of a dark console reads as a rendering fault. */
+.leaflet-control-zoom a{
+  background:rgba(8,11,16,.94)!important;color:var(--fg)!important;
+  border-color:var(--rule)!important;
+}
+.leaflet-control-zoom a:hover{background:var(--raised)!important}
+.leaflet-control-scale-line{
+  background:rgba(8,11,16,.94)!important;border-color:#7f93a6!important;
+  color:var(--fg)!important;font:700 12px ui-monospace,Menlo,monospace!important;
+  padding:2px 6px!important;
+}
 .leaflet-control-attribution a{color:var(--accent)!important}
 #mapBadges{position:absolute;right:8px;top:8px;z-index:600;display:flex;flex-direction:column;gap:6px;align-items:flex-end}
 #mapBadges .chip{background:rgba(8,11,16,.9)}
@@ -270,17 +297,28 @@ header h1 .sub{color:var(--muted);font-weight:600;letter-spacing:.02em}
    read as "a box around the ship" when it is the opposite: the region the ship could
    be in. Each glyph below is drawn with the same CSS the map uses, so the key cannot
    drift from the picture the way a bitmap legend would. */
+/* TOP-LEFT, not bottom-left. It is the first thing a newcomer needs and the corner
+   the eye lands on; the bottom-left corner belongs to the picture-in-picture. The
+   zoom control was moved to bottom-right to clear this space — see initMap(). */
 #legend{
-  position:absolute;left:8px;bottom:8px;z-index:600;background:rgba(8,11,16,.94);
+  position:absolute;left:8px;top:8px;z-index:600;background:rgba(8,11,16,.94);
   border:1px solid var(--rule);border-radius:6px;font-size:var(--f-micro);
   /* CAPPED, AND THAT CAP IS A BUG FIX. The previous revision had no max-height and a
      long explanatory paragraph inside it. Anchored at bottom:8px it grew UPWARDS past
      the top of the pane and covered the tactical picture it was supposed to explain —
      a legend that hides the map is worse than no legend. Height is now bounded to
-     less than half the pane and the list scrolls inside itself. */
-  max-width:min(34ch,calc(100% - 16px));max-height:min(46%,320px);
+     less than half the pane and the list scrolls inside itself. The cap still applies
+     now that it is anchored at the top: it simply grows downwards instead. */
+  /* TWO COLUMNS WHEN THERE IS ROOM. A second camera added three rows, and in a 286 px
+     pane the last of them fell below the scroll fold — present, but not seen, which for
+     a legend is the same as absent. Columns fit the same content in half the height;
+     the pane collapses back to one column when it is too narrow for two. */
+  max-width:min(62ch,calc(100% - 16px));max-height:min(42%,280px);
   overflow:auto;padding:7px 9px;
+  display:grid;grid-template-columns:repeat(auto-fill,minmax(23ch,1fr));
+  column-gap:14px;align-content:start;
 }
+#legend .lg-h{grid-column:1/-1}
 #legend::-webkit-scrollbar{width:8px}
 #legend::-webkit-scrollbar-thumb{background:var(--rule);border-radius:6px}
 #legend .lg-h{
@@ -297,6 +335,16 @@ header h1 .sub{color:var(--muted);font-weight:600;letter-spacing:.02em}
   border-radius:50%;border:2.5px solid var(--claimed);background:var(--muted)}
 #legend i.g-quad::before{content:"";position:absolute;left:0;top:1px;width:17px;height:9px;
   border:2px solid var(--observed);background:rgba(255,208,138,.18);transform:skewX(-20deg)}
+#legend i.g-camb::before{content:"";position:absolute;left:0;top:4px;width:18px;height:0;
+  border-top:4px dashed #ff9ed8}
+#legend i.g-overlap::before{content:"";position:absolute;left:0;top:1px;width:17px;height:9px;
+  border:2px dashed #5ad1c8;background:#123c40}
+#legend i.g-fix::before{content:"";position:absolute;left:1px;top:1px;width:15px;height:9px;
+  border-radius:50%;border:2px solid #5ad1c8;background:rgba(90,209,200,.28)}
+#legend i.g-hull::before{content:"";position:absolute;left:1px;top:2px;width:15px;height:7px;
+  background:var(--muted);clip-path:polygon(0 0,70% 0,100% 50%,70% 100%,0 100%)}
+#legend i.g-faint::before{content:"";position:absolute;left:0;top:1px;width:17px;height:9px;
+  border:1px dashed #6b5a3a;transform:skewX(-20deg)}
 #legend i.g-wedge::before{content:"";position:absolute;left:1px;top:0;width:0;height:0;
   border-left:8px solid transparent;border-right:8px solid transparent;
   border-bottom:12px solid rgba(61,84,104,.85)}
@@ -312,6 +360,185 @@ header h1 .sub{color:var(--muted);font-weight:600;letter-spacing:.02em}
   background:linear-gradient(to top,rgba(8,11,16,.95),rgba(8,11,16,0));
   padding:14px 2px 4px;
 }
+
+/* ===========================================================================
+   OPERATOR VIEW — the same four panes, arranged for a room instead of a review.
+   Map full-bleed; sensor pane as picture-in-picture; queue and evidence in a rail
+   that slides away. Everything here is POSITION ONLY.
+   =========================================================================== */
+#app.operator #grid{
+  display:block;position:relative;background:var(--panel);
+}
+#app.operator #linkBanner, #app.operator #idAlarm, #app.operator #demoteBanner{
+  position:absolute;left:0;right:0;top:0;z-index:820;
+}
+/* The map takes the whole area and loses its heading — the title bar already says
+   where you are, and 28 px of chrome on the pane you are pointing at is 28 px of map. */
+#app.operator .pane:nth-of-type(2){position:absolute;inset:0;z-index:100}
+/* ONE ROW, EXPLICITLY — the same display:none grid trap as the banners, one level down.
+   MEASURED: #map came out 1600 x 0. A .pane is `grid-template-rows:auto minmax(0,1fr)`
+   with the heading in row 1 and .body in row 2. Hiding the heading with display:none
+   REMOVES it from the grid, so .body moved up into the `auto` row, and an auto row sized
+   by a child whose only height is `100%` resolves to zero. The map pane collapsed to
+   nothing and the whole operator view was an empty rectangle. With one row declared,
+   .body is that row whether or not a heading exists. */
+#app.operator .pane:nth-of-type(2){grid-template-rows:minmax(0,1fr)}
+#app.operator .pane:nth-of-type(2)>h2{display:none}
+
+/* ---- picture-in-picture -------------------------------------------------
+   Bottom-left, clear of the map's own legend, which moves right in this layout.
+   Sized in vw with a floor so it stays legible on a laptop and does not eat a
+   projector. Resizable by the browser because an operator's idea of "big enough"
+   is not ours. */
+/* MAXIMISED SIZE DOUBLED in both dimensions on request — the feed is what an
+   operator looks at while deciding, and at the old size a hull was a few dozen
+   pixels. One custom property drives the width AND the 16:9 body height, so the two
+   cannot drift apart. min(90vw, ...) keeps it on screen on a laptop, where twice the
+   old floor would otherwise be wider than the window. */
+#app.operator .pane:nth-of-type(1){
+  --pipw:min(90vw,clamp(600px,52vw,920px));
+  position:absolute;left:14px;bottom:14px;z-index:700;
+  width:var(--pipw);
+  border:1px solid var(--rule);border-radius:10px;overflow:hidden;
+  box-shadow:0 10px 30px rgba(0,0,0,.55);
+  background:var(--panel);
+  transition:width .18s ease;
+}
+#app.operator .pane:nth-of-type(1)>h2{
+  cursor:pointer;font-size:var(--f-micro);padding:6px 10px;
+  display:flex;align-items:center;gap:8px;
+}
+#app.operator .pane:nth-of-type(1)>h2 .crit{display:none}
+#app.operator .pane:nth-of-type(1) .body{height:calc(var(--pipw)*0.5625)}
+#app.operator .pane:nth-of-type(1) #sensorFoot{display:none}
+/* MINIMISED: the title bar only. Kept in the DOM and kept STREAMING — a collapsed
+   pane that tore down the video would make re-opening it a three-second black
+   rectangle, and on stage that reads as a broken feed. */
+#app.operator.pipmin .pane:nth-of-type(1){width:min(300px,60vw)}
+#app.operator.pipmin .pane:nth-of-type(1) .body{display:none}
+
+/* ---- the rail: queue over evidence, both scrolling, slides away --------- */
+#app.operator .pane:nth-of-type(3),
+#app.operator .pane:nth-of-type(4){
+  /* WIDENED 50% on request: min(38vw,470px) -> min(57vw,705px). This also buys back
+     the room the queue rows were fighting over — see the .ident badge note above,
+     which stays because the rail can still be narrow on a laptop. */
+  position:absolute;right:0;z-index:600;width:min(57vw,705px);
+  border-left:2px solid var(--rule);
+  transition:transform .2s ease;
+}
+#app.operator .pane:nth-of-type(3){top:0;height:52%}
+#app.operator .pane:nth-of-type(4){top:52%;bottom:0;height:48%}
+#app.operator.railshut .pane:nth-of-type(3),
+#app.operator.railshut .pane:nth-of-type(4){transform:translateX(100%)}
+#railToggle{
+  position:absolute;top:50%;right:min(57vw,705px);transform:translateY(-50%);
+  z-index:640;display:none;align-items:center;justify-content:center;
+  width:26px;height:64px;border-radius:8px 0 0 8px;cursor:pointer;
+  background:var(--panel);border:2px solid var(--rule);border-right:none;
+  color:var(--fg2);font:800 15px/1 ui-monospace,Menlo,monospace;
+  transition:right .2s ease;
+}
+#app.operator #railToggle{display:flex}
+#app.operator.railshut #railToggle{right:0}
+/* THE LEGEND STAYS TOP-LEFT IN THIS LAYOUT TOO. It used to be pushed right, to
+   `right:calc(min(38vw,470px) + 12px)`, because it was anchored at the BOTTOM and the
+   bottom-left corner is the picture-in-picture's. Now that it is anchored top-left
+   there is no conflict — the PiP is at the bottom, the status chips are top-right —
+   and the old rule would have parked the explanation of the map on the far side of
+   the map. The rule is gone rather than rewritten; the base #legend rule is correct.
+   (It also still said 38vw/470px, which is no longer the rail's width.) */
+#app.operator #mapFoot{right:calc(min(57vw,705px) + 8px)}
+#app.operator.railshut #mapFoot{right:8px}
+#app.operator #mapBadges{right:calc(min(57vw,705px) + 12px)}
+#app.operator.railshut #mapBadges{right:12px}
+
+/* ---- the glyph layer ----------------------------------------------------
+   HTML over the map rather than shapes inside it, and that is a deliberate choice.
+   A glyph drawn as map geometry scales with zoom: at a 20 km view a 200 m tick is
+   five pixels and unreadable, and at 2 km it swamps the vessel. A status mark must
+   be the SAME SIZE whatever the zoom, because it is a statement about the contact
+   and not a measurement of it — the ellipse is the measurement. Positioned by
+   projecting lat/lon to container pixels through one adapter that both map backends
+   implement. */
+#mapGlyphs{position:absolute;inset:0;z-index:520;pointer-events:none}
+#mapGlyphs .gm{
+  position:absolute;transform:translate(-50%,-50%);
+  display:flex;align-items:center;justify-content:center;
+  width:22px;height:22px;border-radius:50%;
+  font:800 13px/1 ui-sans-serif,-apple-system,Segoe UI,Roboto,sans-serif;
+  border:2px solid currentColor;background:rgba(8,11,16,.86);
+  pointer-events:auto;cursor:pointer;
+}
+#mapGlyphs .gm.sel{width:28px;height:28px;font-size:16px;border-width:3px}
+#mapGlyphs .gm.fixed::after{
+  content:"";position:absolute;inset:-5px;border-radius:50%;
+  border:1px dashed #5ad1c8;opacity:.9;
+}
+
+/* ---- the picture-in-picture is 416 px wide, so its overlays must be too ----
+   The provenance caveat is three lines of 13 px type across the middle of a 234 px-tall
+   pane: at review size it is a note, at PiP size it IS the pane. It cannot simply be
+   dropped — "this imagery is synthetic, no camera observed it" is the one sentence that
+   must never come off this screen — so it moves to a single clipped line at the bottom
+   with the full text on hover, which is where a caption belongs anyway. */
+#app.operator #videoSync{
+  top:auto;bottom:6px;left:6px;right:6px;padding:4px 8px;
+  font-size:10px;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+#app.operator #sensorBadges{gap:4px}
+#app.operator #sensorBadges .chip{font-size:9px;padding:2px 6px;letter-spacing:.04em}
+#app.operator #noVideo{font-size:11px;line-height:1.4;padding:10px}
+#app.operator #noVideo strong{font-size:12px}
+/* The heading doubles as the minimise control, so it says so. */
+#app.operator .pane:nth-of-type(1)>h2::after{
+  content:"— click to " attr(data-act);color:var(--muted);font-weight:600;
+}
+
+/* ---- the rail is narrower than the review layout, so the rows must be ----
+   MEASURED: each queue row wanted 475 px inside a 456 px rail — nineteen pixels, which
+   clipped "priority 0.79" and the confidence bar off the right edge. The rank column is
+   `clamp(120px,9.5vw,180px)`, sized for a full-width pane; in a 470 px rail a column
+   152 px wide holds a single digit. `auto` sizes it to the digit, and minmax(0,1fr) lets
+   the middle column shrink instead of pushing its neighbour out of the pane. */
+#app.operator .pane:nth-of-type(3) .row{
+  grid-template-columns:auto minmax(0,1fr) auto;gap:0 10px;
+}
+#app.operator .pane:nth-of-type(3) .conf .track{max-width:74px}
+/* The right column reserves clamp(120px,10vw,190px) for the confidence bar and the
+   priority figure — sized for a full-width pane. In the rail that reservation is taken
+   straight out of the identity block, which then needs 230 px in 204 and clips the
+   vessel badges. The badges are the part an operator reads across a room, so the
+   reservation shrinks and they get the room. */
+#app.operator .pane:nth-of-type(3) .rightcol{min-width:96px}
+#app.operator .pane:nth-of-type(3) .ident{min-width:0}
+#app.operator .pane:nth-of-type(3) .badge{letter-spacing:.06em;padding:3px 7px}
+/* ---- badges must wrap rather than cross into the confidence bar ----
+   MEASURED in the rail at 2000x1100: the .ident column is 242 px and the
+   "synthetic - no camera" badge is 253 px. .badge carries white-space:nowrap, so it
+   cannot shrink; the column is minmax(0,1fr), so it shrinks BELOW its content rather
+   than pushing its neighbour out. The badge therefore overflowed by 11 px on EVERY
+   row, landing its right edge at 1873 where .rightcol starts at 1872 -- the "80%"
+   numeral and the priority figure were drawn on top of the badge text.
+   Shortening the wording was the wrong fix: "synthetic - no camera" is the
+   provenance disclaimer, and it has to stay legible in full. So the badge wraps
+   instead. max-width:100% resolves against .ident's 242 px content box, and
+   white-space:normal drops the min-content width from 253 px to the longest word. */
+.ident .badge{white-space:normal;max-width:100%}
+#app.operator .pane:nth-of-type(3) .why{grid-column:2}
+
+/* ---- the legend folds away -------------------------------------------------
+   It is 379 x 251 px of explanation sitting on top of the thing it explains. In the
+   review layout that trade is right — a judge reads it once. In the operator layout the
+   map IS the product, so the legend starts folded and is one click away. The state is
+   remembered, because an operator who wants it open wants it open tomorrow too. */
+#app.operator.legendoff #legend{display:none}
+#legendToggle{cursor:pointer;user-select:none}
+#app:not(.operator) #legendToggle{display:none}
+/* The footer paragraph explains the quad at length. It is genuinely useful and it is
+   also 60 characters wide across the bottom of the map, straight through the
+   picture-in-picture. It goes with the legend. */
+#app.operator.legendoff #mapFoot{display:none}
 
 /* ================= 3. priority queue ================= */
 #queue{list-style:none;padding:4px}
@@ -502,11 +729,15 @@ body.degraded .pane>h2::after{content:" · STALE";color:var(--dark);font-weight:
   <div class="spacer"></div>
   <span class="chip">operator <input id="opid" value="operator-1" aria-label="operator id" spellcheck="false"></span>
   <span class="chip" id="cClock"><span class="mono" id="tClock">--:--:--</span> UTC</span>
+  <span class="chip" id="cLayout" role="button" tabindex="0"
+        title="switch between the four-pane review layout and the operator layout"
+        style="cursor:pointer">view <b id="tLayout">console</b></span>
 </header>
 
 <div id="sceneCaveat" role="note"></div>
 
 <div id="grid">
+  <div id="railToggle" role="button" tabindex="0" title="show / hide the queue and evidence">&#8250;</div>
   <div id="linkBanner" role="status" aria-live="polite"></div>
   <div id="demoteBanner" role="status" aria-live="polite" hidden></div>
 
@@ -535,10 +766,18 @@ body.degraded .pane>h2::after{content:" · STALE";color:var(--dark);font-weight:
     <h2>2 · Tactical picture <span class="crit">claimed vs observed</span></h2>
     <div class="body">
       <div id="map"></div>
+      <div id="mapGlyphs" aria-hidden="true"></div>
       <div id="mapBadges">
+        <span class="chip" id="legendToggle" role="button" tabindex="0">legend</span>
         <span class="chip" id="cBasemap">no basemap · offline-safe</span>
       </div>
       <div id="legend">
+        <div class="lg-h">two cameras</div>
+        <span><i class="g-camb"></i>camera B field of view</span>
+        <span><i class="g-overlap"></i>overlap &mdash; both see it</span>
+        <span><i class="g-fix"></i>cross-fix 1&sigma; ellipse</span>
+        <span><i class="g-hull"></i>hull, to OBSERVED length</span>
+        <span><i class="g-faint"></i>1-camera quad, superseded</span>
         <div class="lg-h">the wall</div>
         <span><i class="g-dot"></i>AIS claim</span>
         <span><i class="g-quad"></i>observation &mdash; uncertainty quad</span>
@@ -593,7 +832,11 @@ body.degraded .pane>h2::after{content:" · STALE";color:var(--dark);font-weight:
        empty. It is discharged here instead, beside the map it applies to.
        IT LIVES INSIDE #app: as a sibling after it, it rendered at y=1080 in a 1080 px
        viewport under body{overflow:hidden} and no viewer could reach it. -->
-  Map rendering: <a href="https://leafletjs.com/">Leaflet</a> 1.9.4 (BSD-2-Clause).
+  Map rendering: <a href="https://leafletjs.com/">Leaflet</a> 1.9.4 (BSD-2-Clause), served
+  from a local copy.  ·  Basemap tiles, when a basemap is on: default is Esri World Dark Gray
+  — tiles &copy; <a href="https://www.esri.com/">Esri</a>, sources Esri, HERE, Garmin and
+  &copy; OpenStreetMap contributors; <code>?tiles=osm</code> serves plain OpenStreetMap under
+  ODbL instead. Tiles are fetched live and are NOT cached or redistributed by this build.
   &nbsp;·&nbsp; AIS: Danish Maritime Authority, act 596/2005 — redistribution not
   addressed; identities pseudonymised on every outbound route.
   &nbsp;·&nbsp; Vessel detection (YOLO path): Ultralytics AGPL-3.0-or-later; COCO
@@ -1475,6 +1718,28 @@ function installOfflineMap() {
       if (!this._bounds) this._bounds = [[c[0] - d, c[1] - d * 1.7], [c[0] + d, c[1] + d * 1.7]];
       this._redraw(); return this; }
     fitBounds(b) { this._bounds = b.toArray ? b.toArray() : b; this._redraw(); return this; }
+    /* Container pixels for a lat/lon. The ONE method the glyph layer needs, and the
+       only thing it needs from a map backend — real Leaflet answers the same question
+       with latLngToContainerPoint(), so the overlay does not care which is running. */
+    project(lat, lon) {
+      if (!this._proj) return null;
+      const [x, y] = this._proj.xy(lat, lon);
+      return { x, y };
+    }
+    /* THE NAME THE COMMENT ABOVE ALWAYS PROMISED, now actually present.
+       The glyph layer used to call project(lat, lon) — this shim's signature. Real
+       Leaflet's project() takes a LatLng, not two numbers, and returns ABSOLUTE CRS
+       pixels rather than container pixels; called the shim's way it threw
+       "Cannot read properties of null (reading 'lat')" and aborted renderMap()
+       mid-flight, which is what left the map sitting at zoom 0. The bug could only
+       appear once real Leaflet was loading reliably — while it came from a blocked
+       CDN the shim ran instead and the two-argument call was correct.
+       Both backends now answer to latLngToContainerPoint([lat, lon]). */
+    latLngToContainerPoint(ll) {
+      const la = Array.isArray(ll) ? ll[0] : ll.lat;
+      const lo = Array.isArray(ll) ? ll[1] : (ll.lng ?? ll.lon);
+      return this.project(la, lo);
+    }
     _redraw() {
       const w = this.host.clientWidth || 600, h = this.host.clientHeight || 400;
       if (!this._proj || this._proj.w !== w || this._proj.h !== h) this._proj = new Proj(w, h);
@@ -1486,6 +1751,10 @@ function installOfflineMap() {
       for (const l of this._own) l.draw(this._proj, g);
       for (const grp of this._groups) for (const l of grp.children) l.draw(this._proj, g);
       this._scaleBar(g, w, h);
+      /* The glyph layer is HTML, outside this SVG, so it has to be told when the
+         projection moved. A resize that repositioned every shape and left the status
+         marks where they were would put a tick on the wrong vessel. */
+      if (typeof window.onMapRedraw === "function") window.onMapRedraw();
     }
     /* A plan view with no basemap needs a scale and a north mark, or every distance on
        it is unreadable and the pane asserts geometry it does not explain. */
@@ -1540,7 +1809,7 @@ function installOfflineMap() {
 /* ===========================================================================
    6. PANE 2 — MAP
    =========================================================================== */
-let MAP = null, LAYER = null, fitted = false;
+let MAP = null, LAYER = null, fitted = false, fittedFor = null;
 
 async function initMap() {
   let offline = false;
@@ -1554,19 +1823,102 @@ async function initMap() {
     installOfflineMap();
     offline = true;
   }
-  MAP = L.map("map", { zoomControl: true, attributionControl: true })
+  MAP = L.map("map", { zoomControl: false, attributionControl: true })
         .setView([54.60, 11.30], 11);
 
-  /* TILES ARE OPT-IN (?tiles=1). A basemap needs live internet on every pan and zoom,
-     and a half-loaded tile grid on a projector reads as a broken tool. Off, the map
-     draws real geometry on a graticule: deterministic, rehearsable, identical every
-     run. That is worth more in a four-minute pitch than a prettier background. */
-  if (new URLSearchParams(location.search).get("tiles") === "1") {
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-      { maxZoom: 18, attribution: "&copy; OpenStreetMap" }).addTo(MAP);
-    $("cBasemap").textContent = "OSM basemap · needs network";
+  /* CONTROLS GO BOTTOM-RIGHT — the only corner not already spoken for. Top-left is
+     the legend (moved there so it reads first), top-right the status chips,
+     bottom-left the picture-in-picture. */
+  if (L.control && L.control.zoom) L.control.zoom({ position: "bottomright" }).addTo(MAP);
+  /* A SCALE BAR IS NOT DECORATION ON THIS PANE. The hull marks are drawn to the
+     CAMERA-OBSERVED length, so their size on screen is a measurement — and a
+     measurement with no ruler beside it cannot be checked. Metric only: a maritime
+     watch officer works in metres and nautical miles, and an imperial bar next to a
+     bearing in degrees true is noise. The offline shim draws its own bar and north
+     mark, so this is added only for real Leaflet. */
+  if (L.control && L.control.scale)
+    L.control.scale({ position: "bottomright", metric: true, imperial: false,
+                      maxWidth: 190 }).addTo(MAP);
+
+  /* ---- BASEMAP -------------------------------------------------------------
+     Tiles used to be opt-in (?tiles=1) on the argument that a half-loaded grid on a
+     projector reads as a broken tool. That argument was right about the failure and
+     wrong about the default: with no basemap the pane shows wedges floating in a void,
+     and an operator cannot tell a shipping lane from open water. So tiles are now ON,
+     and the FAILURE is handled explicitly rather than avoided by staying dark.
+
+       ?tiles       (absent)  CARTO dark_matter  <- default, matches the console
+       ?tiles=osm             OpenStreetMap standard (light)
+       ?tiles=0 | off         no basemap, graticule only — the old behaviour
+
+     DARK BY DEFAULT because contrast is a stated project requirement: OSM standard is
+     a light map under a dark console, and white land against a #070a0f panel drops the
+     verdict colours below 7:1. dark_matter is the same OSM data rendered dark.
+
+     THE FALLBACK IS REAL, NOT DECORATIVE. If no tile loads within TILE_TIMEOUT_MS the
+     layer is removed, the graticule is drawn, and the chip SAYS the basemap failed.
+     A missing coastline and a wrong coastline are different absences and the operator
+     is entitled to know which one is on screen. Venue wifi is the expected case. */
+  const TILE_TIMEOUT_MS = 6000;
+  const wanted = (new URLSearchParams(location.search).get("tiles") || "dark").toLowerCase();
+  /* CARTO WAS DROPPED, AND THE REASON IS WORTH RECORDING. dark_all still SERVES a
+     200 and a valid 256 px PNG without a key — so every automated check passed — but
+     the image it serves now has "API Key required" tiled across it. A basemap that
+     fails by returning a watermark instead of an error is the worst failure mode
+     there is: nothing downstream can detect it, and it is visible to everyone in the
+     room. Verified by rendering candidate tiles side by side and LOOKING at them.
+
+     Esri World Dark Gray needs no key, renders land grey on near-black water, and
+     keeps its coastline crisp at the strait scale this demo lives at. The Reference
+     layer is a separate transparent overlay carrying place names — Esri splits base
+     and labels, which is useful here: labels can be dropped without losing the land.
+
+     LICENCE, stated rather than assumed: these are Esri's public ArcGIS Online
+     basemaps, free to use with the attribution string below, and the underlying data
+     is OpenStreetMap under ODbL plus Esri/HERE/Garmin sources. They are FETCHED LIVE
+     and nothing is cached or redistributed by this build. Esri's terms are written
+     for ArcGIS customers and are not a clean open licence; for a hackathon demo with
+     attribution that is defensible, and it is flagged in 02_data/DATASETS.md rather
+     than left as a silent assumption. ?tiles=osm is the unambiguous fallback: plain
+     OpenStreetMap under ODbL, no ambiguity, at the cost of being a light map. */
+  const ESRI = "https://services.arcgisonline.com/ArcGIS/rest/services/";
+  const ESRI_ATTR = "Tiles &copy; Esri — sources: Esri, HERE, Garmin, "
+                  + "&copy; OpenStreetMap contributors";
+  const BASEMAPS = {
+    dark: {
+      url: ESRI + "Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+      opts: { maxZoom: 16, attribution: ESRI_ATTR },
+      /* Place names, as a transparent layer over the base. */
+      overlay: ESRI + "Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}",
+      chip: "Esri dark basemap · needs network",
+    },
+    osm: {
+      url: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+      opts: { maxZoom: 18, attribution: "&copy; OpenStreetMap contributors" },
+      chip: "OSM basemap · needs network",
+    },
+  };
+  const choice = BASEMAPS[wanted] || (wanted === "1" ? BASEMAPS.dark : null);
+
+  if (choice && !offline) {
+    const tiles = L.tileLayer(choice.url, choice.opts).addTo(MAP);
+    if (choice.overlay)
+      L.tileLayer(choice.overlay, { maxZoom: choice.opts.maxZoom, pane: "overlayPane" })
+        .addTo(MAP);
+    $("cBasemap").textContent = choice.chip;
+    let anyLoaded = false;
+    tiles.on("tileload", () => { anyLoaded = true; });
+    setTimeout(() => {
+      if (anyLoaded) return;
+      /* Not one tile arrived. Take the layer away rather than leave grey squares
+         under real geometry — a grey square is indistinguishable from land. */
+      MAP.removeLayer(tiles);
+      drawGraticule();
+      $("cBasemap").textContent = "basemap unreachable · plan view · geometry is real";
+    }, TILE_TIMEOUT_MS);
   } else {
     drawGraticule();
+    if (!offline) $("cBasemap").textContent = "no basemap · offline-safe";
   }
   if (offline) {
     /* Said on the screen, not just in a console log. An operator is entitled to know
@@ -1575,6 +1927,38 @@ async function initMap() {
     $("cBasemap").textContent = "offline plan view · no basemap · geometry is real";
   }
   LAYER = L.layerGroup().addTo(MAP);
+
+  /* ---- THE MAP MUST BE TOLD ITS BOX CHANGED, AND setLayout() IS NOT ENOUGH -------
+     MEASURED at 2000x1100 after pressing `v`: MAP.getSize() already read [2000, 921]
+     and matched the container exactly -- yet only 27 tiles were in the DOM, covering
+     1152x384 of a 2000x921 pane. The right half and the bottom two thirds were empty.
+     A SECOND invalidateSize() a moment later took it to 168 tiles covering 2304x1280.
+
+     So the size was never wrong; the tile GRID was simply not repopulated by the call
+     setLayout() makes inside requestAnimationFrame. The pane goes from a grid cell to
+     position:absolute;inset:0 in the same frame, and Leaflet's grid work lands while
+     the box is still settling. Guessing a longer delay would be guessing.
+
+     A ResizeObserver removes the timing question: it fires AFTER layout, with the box
+     that actually resulted, however the box got there -- layout flip, window resize,
+     rail folding, the legend opening. The offline shim has watched itself this way
+     since it was written (see installOfflineMap); real Leaflet does not, which is why
+     this was invisible until a basemap was switched on and empty tiles could be seen.
+     rAF-coalesced so a drag-resize does not queue one reflow per pixel. */
+  if (typeof ResizeObserver === "function" && typeof MAP.invalidateSize === "function") {
+    let queued = false;
+    new ResizeObserver(() => {
+      if (queued) return;
+      queued = true;
+      requestAnimationFrame(() => {
+        queued = false;
+        MAP.invalidateSize();
+        renderMap();          /* reaches the refit test above with the NEW box */
+        renderGlyphs();
+      });
+    }).observe($("map"));
+  }
+
   renderMap();
 }
 
@@ -1583,6 +1967,154 @@ function drawGraticule() {
     L.polyline([[lat, 10.8], [lat, 11.9]], { color: "#1d2733", weight: 1 }).addTo(MAP);
   for (let lon = 10.8; lon <= 11.9; lon += 0.1)
     L.polyline([[54.3, lon], [55.0, lon]], { color: "#1d2733", weight: 1 }).addTo(MAP);
+}
+
+/* ===========================================================================
+   6a. TWO CAMERAS — the geometry the map needs and nothing more.
+   =========================================================================== */
+
+/* A camera's field of view as a closed polygon: apex, arc, apex. Convex for any
+   half-angle under 90 degrees, which every real lens here is — and convexity is what
+   lets the overlap below be computed by clipping. */
+function fovPolygon(pose, step) {
+  const half = pose.fov_half_angle_deg ?? (pose.hfov_deg || 60) / 2;
+  const rng = pose.max_range_m || 8000, b = pose.boresight_deg_true || 0;
+  const arc = [[pose.lat_deg, pose.lon_deg]];
+  for (let a = -half; a <= half + 1e-9; a += (step || 2))
+    arc.push(destination(pose.lat_deg, pose.lon_deg, b + a, rng));
+  arc.push([pose.lat_deg, pose.lon_deg]);
+  return arc;
+}
+
+/* Sutherland-Hodgman: clip a convex subject polygon by a convex clip polygon.
+   WHY THIS IS CORRECT IN RAW LAT/LON. Clipping is a sequence of half-plane
+   intersections, and half-planes are preserved by any AFFINE map. Over a few tens of
+   kilometres the lat/lon grid is an affine image of the local east-north plane, so the
+   polygon this returns is the same set as clipping in metres and projecting back. It is
+   NOT correct over continental spans, and nothing here spans one. */
+function clipConvex(subject, clip) {
+  const inside = (p, a, b) =>
+    (b[1] - a[1]) * (p[0] - a[0]) - (b[0] - a[0]) * (p[1] - a[1]) >= 0;
+  const cut = (p, q, a, b) => {
+    const r = [q[0] - p[0], q[1] - p[1]], e = [b[0] - a[0], b[1] - a[1]];
+    const den = e[1] * r[0] - e[0] * r[1];
+    if (Math.abs(den) < 1e-15) return q;
+    const t = (e[1] * (a[0] - p[0]) - e[0] * (a[1] - p[1])) / den;
+    return [p[0] + t * r[0], p[1] + t * r[1]];
+  };
+  /* The clip polygon must be wound counter-clockwise for `inside` to mean inside.
+     Shoelace tells us which way it is; reversing a mis-wound polygon is cheaper than
+     demanding every caller know the convention. */
+  let area = 0;
+  for (let i = 0; i < clip.length; i++) {
+    const a = clip[i], b = clip[(i + 1) % clip.length];
+    area += a[1] * b[0] - b[1] * a[0];
+  }
+  const cw = area < 0 ? clip.slice().reverse() : clip;
+
+  let out = subject.slice();
+  for (let i = 0; i < cw.length && out.length; i++) {
+    const a = cw[i], b = cw[(i + 1) % cw.length];
+    const input = out; out = [];
+    for (let j = 0; j < input.length; j++) {
+      const cur = input[j], prev = input[(j + input.length - 1) % input.length];
+      const cin = inside(cur, a, b), pin = inside(prev, a, b);
+      if (cin) { if (!pin) out.push(cut(prev, cur, a, b)); out.push(cur); }
+      else if (pin) out.push(cut(prev, cur, a, b));
+    }
+  }
+  return out;
+}
+
+/* An error ellipse as a polygon, so it draws through the same L.polygon call as
+   everything else and works on both map backends. `orient` is the bearing TRUE of the
+   MAJOR axis, which is how triangulate.py reports it. */
+function ellipsePolygon(lat, lon, majorM, minorM, orientDeg, n) {
+  const N = n || 40, th = rad(orientDeg || 0), out = [];
+  for (let k = 0; k < N; k++) {
+    const t = 2 * Math.PI * k / N;
+    const nm = majorM * Math.cos(t) * Math.cos(th) - minorM * Math.sin(t) * Math.sin(th);
+    const em = majorM * Math.cos(t) * Math.sin(th) + minorM * Math.sin(t) * Math.cos(th);
+    const r = Math.hypot(nm, em);
+    out.push(destination(lat, lon, deg(Math.atan2(em, nm)), r));
+  }
+  return out;
+}
+
+const SENSOR_COLOURS = ["#7fd4ff", "#ff9ed8", "#a8ff9e"];
+
+/* WHAT EACH VERDICT LOOKS LIKE AT A GLANCE.
+   The SHAPE carries the meaning, because a shape is readable across a room and a hue is
+   not. The COLOUR stays the verdict palette the priority queue and the legend already
+   use — two vocabularies for one fact is how a console starts contradicting itself, and
+   this project has paid for that twice already.
+
+   MATCH IS NOT GREEN, AND THAT IS DELIBERATE. Green reads as "all clear", and a MATCH
+   verdict does not say the vessel is fine: it says the transponder's claim agrees with
+   what the camera saw. A vessel can broadcast an entirely truthful identity and still be
+   the one loitering over the cable. The tick says "no discrepancy found", which is what
+   was actually measured, and the neutral colour keeps it from being read as an
+   endorsement nobody issued. */
+const GLYPHS = {
+  MATCH:   { ch: "\u2713", col: "#b6c6d6", say: "no discrepancy found" },
+  SPOOF:   { ch: "!",       col: "#ff9090", say: "claim contradicted by the camera" },
+  DARK:    { ch: "?",       col: "#ffb64d", say: "seen, no transponder claim" },
+  UNKNOWN: { ch: "\u00b7", col: "#c9a6ff", say: "deferred to a human" },
+};
+
+let GLYPH_ITEMS = [];
+
+/* Positioned every redraw, and on every map move. Cheap: a handful of absolutely
+   positioned spans, no layout thrash, no SVG rebuild. */
+function renderGlyphs() {
+  const host = $("mapGlyphs");
+  if (!host || !MAP || typeof MAP.latLngToContainerPoint !== "function") return;
+  host.replaceChildren();
+  const w = host.clientWidth, h = host.clientHeight;
+  for (const it of GLYPH_ITEMS) {
+    /* Wrapped, because this runs inside renderMap(): before this guard existed a
+       single un-projectable point threw and took the REST OF THE MAP down with it —
+       the fit, the fixes, everything after the glyph loop. One bad contact must cost
+       one glyph, not the tactical picture. */
+    let pt = null;
+    try { pt = MAP.latLngToContainerPoint([it.lat, it.lon]); } catch { pt = null; }
+    if (!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y)) continue;
+    /* Off-screen marks are dropped rather than clamped to the edge. A glyph pinned to
+       the border would claim a contact is at the edge of the picture when it is simply
+       not in it. */
+    if (pt.x < -20 || pt.y < -20 || pt.x > w + 20 || pt.y > h + 20) continue;
+    const g = GLYPHS[it.label] || GLYPHS.UNKNOWN;
+    const el = document.createElement("div");
+    el.className = "gm" + (it.rid && it.rid === S.selected ? " sel" : "")
+                 + (it.fixed ? " fixed" : "");
+    el.style.left = pt.x + "px";
+    el.style.top = pt.y + "px";
+    el.style.color = g.col;
+    el.textContent = g.ch;
+    el.title = `${it.label} — ${g.say}`
+             + (it.fixed ? " · fixed by two cameras" : " · one camera")
+             + (it.cid ? ` · ${it.cid}` : "");
+    if (it.rid) el.addEventListener("click", () => select(it.rid));
+    host.appendChild(el);
+  }
+}
+window.onMapRedraw = renderGlyphs;
+
+/* A hull drawn TO SCALE on the water: pointed bow, square stern, beam taken as a fifth
+   of the length, which is a workable mean for merchant traffic and is stated rather than
+   implied. `lengthM` must be the CAMERA-OBSERVED length — see patch_marks.py for why the
+   claimed one must never reach this function. */
+function hullPolygon(lat, lon, lengthM, headingDeg) {
+  const L = Math.max(20, lengthM || 0), B = Math.max(8, L / 5);
+  const h = headingDeg || 0;
+  /* Body coordinates: +x forward along the heading, +y to starboard. Converted to a
+     bearing and a distance so the existing destination() does the geodesy. */
+  const body = [[0.5 * L, 0], [0.28 * L, 0.5 * B], [-0.5 * L, 0.5 * B],
+                [-0.5 * L, -0.5 * B], [0.28 * L, -0.5 * B]];
+  return body.map(([fwd, stb]) => {
+    const r = Math.hypot(fwd, stb);
+    return destination(lat, lon, h + deg(Math.atan2(stb, fwd)), r);
+  });
 }
 
 function renderMap() {
@@ -1594,17 +2126,52 @@ function renderMap() {
      The FOV wedge is not decoration. A claim with no observation INSIDE the wedge is
      a finding; the same claim OUTSIDE it is a vessel the camera simply cannot see.
      Drawing the boundary is what stops an operator reading the second as the first. */
-  if (pose.lat_deg !== undefined) {
-    const half = pose.fov_half_angle_deg ?? (pose.hfov_deg || 60) / 2;
-    const rng = pose.max_range_m || 8000, b = pose.boresight_deg_true || 0;
-    const arc = [[pose.lat_deg, pose.lon_deg]];
-    for (let a = -half; a <= half; a += 2) arc.push(destination(pose.lat_deg, pose.lon_deg, b + a, rng));
-    arc.push([pose.lat_deg, pose.lon_deg]);
-    L.polygon(arc, { color: "#3d5468", weight: 2, fillColor: "#0e1a24", fillOpacity: .45, interactive: false })
-      .addTo(LAYER).bindTooltip(`sensor field of view · ${fmt(rng / 1000, 1)} km max range`);
-    L.circleMarker([pose.lat_deg, pose.lon_deg], { radius: 8, color: "#7fd4ff", weight: 3, fillOpacity: 1 })
-      .addTo(LAYER).bindTooltip("camera · " + (pose.pose_ref || "pose"));
-    pts.push([pose.lat_deg, pose.lon_deg]);
+  /* EVERY sensor the station knows about, not just the first. `sensors` is published
+     by server.py's pose registry, primary first; the single-pose fallback keeps this
+     working against a server that predates lane G. */
+  const sensors = (S.stage.sensors && S.stage.sensors.length)
+    ? S.stage.sensors : (pose.lat_deg !== undefined ? [pose] : []);
+  const wedges = [];
+  sensors.forEach((sp, i) => {
+    if (sp.lat_deg === undefined) return;
+    const col = SENSOR_COLOURS[i % SENSOR_COLOURS.length];
+    const poly = fovPolygon(sp, 2);
+    wedges.push(poly);
+    L.polygon(poly, { color: i ? col : "#3d5468", weight: 2, fillColor: "#0e1a24",
+                      fillOpacity: i ? .28 : .45, dashArray: i ? "7 6" : null,
+                      interactive: false })
+      .addTo(LAYER)
+      .bindTooltip(`${sp.role === "secondary" ? "camera B" : "camera A"} field of view · `
+        + `${fmt((sp.max_range_m || 8000) / 1000, 1)} km · bore ${fmt(sp.boresight_deg_true, 1)}°T`);
+    L.circleMarker([sp.lat_deg, sp.lon_deg],
+      { radius: 8, color: col, weight: 3, fillColor: "#0b0e13", fillOpacity: 1 })
+      .addTo(LAYER)
+      .bindTooltip((sp.role === "secondary" ? "camera B · " : "camera A · ") + (sp.pose_ref || "pose"));
+    pts.push([sp.lat_deg, sp.lon_deg]);
+  });
+
+  /* THE OVERLAP IS THE POINT OF THE SECOND CAMERA, SO IT IS DRAWN.
+     Inside it a hull can be cross-fixed: two bearings CONSTRUCT a position and the
+     long monocular sliver collapses to a small ellipse. Outside it, camera B adds
+     nothing and the operator should be able to see that at a glance rather than
+     wonder why one contact has a tight fix and its neighbour does not. */
+  if (wedges.length >= 2) {
+    const ov = clipConvex(wedges[0], wedges[1]);
+    if (ov.length >= 3) {
+      L.polygon(ov, { color: "#5ad1c8", weight: 2, dashArray: "4 5",
+                      fillColor: "#123c40", fillOpacity: .55, interactive: false })
+        .addTo(LAYER)
+        .bindTooltip("OVERLAP — both cameras see this water. A hull here can be "
+          + "cross-fixed: two bearings construct a position instead of estimating one.");
+    }
+    /* The baseline. Its LENGTH and its angle to a target are what set the crossing
+       angle, and the crossing angle is what decides whether a fix is a circle or a
+       sliver. Drawn because an operator asking "why is that ellipse so long" is asking
+       a question about this line. */
+    L.polyline([[sensors[0].lat_deg, sensors[0].lon_deg],
+                [sensors[1].lat_deg, sensors[1].lon_deg]],
+      { color: "#5ad1c8", weight: 1, dashArray: "2 7", opacity: .8, interactive: false })
+      .addTo(LAYER).bindTooltip("baseline between the two cameras");
   }
 
   /* ---- protected infrastructure: the cable route as a LINE ---------------- */
@@ -1654,6 +2221,11 @@ function renderMap() {
        sight position spoof is undetectable: the quad is stretched in exactly the
        direction the deception hides in. */
     const c = rec.eo_contact;
+    /* Has this contact been cross-fixed? If so the quad is HISTORY, not the answer,
+       and is drawn as a thin outline so the ellipse that replaced it is the thing the
+       eye lands on. Looked up by contact id because server.py keys the table by BOTH
+       cameras' ids — the pipeline only ever holds camera A's. */
+    const fixed = c && (S.stage.fix_by_contact || {})[c.contact_id];
     if (c && pose.lat_deg !== undefined && c.observed_range_m) {
       const br = c.observed_bearing_deg_true, db = c.bearing_uncertainty_deg || 1;
       const r0 = Math.max(0, c.observed_range_m - (c.range_uncertainty_m || 0));
@@ -1664,11 +2236,17 @@ function renderMap() {
         destination(pose.lat_deg, pose.lon_deg, br + db, r1),
         destination(pose.lat_deg, pose.lon_deg, br - db, r1),
       ];
-      L.polygon(quad, { color: "#ffd08a", weight: sel ? 3 : 2, fillColor: colour,
-        fillOpacity: sel ? .35 : .18 })
+      L.polygon(quad, {
+        color: fixed ? "#6b5a3a" : "#ffd08a",
+        weight: fixed ? 1 : (sel ? 3 : 2),
+        fillColor: colour,
+        fillOpacity: fixed ? 0.05 : (sel ? .35 : .18),
+        dashArray: fixed ? "3 5" : null })
         .addTo(LAYER)
         .bindTooltip(`OBSERVED ${c.contact_id} · brg ${fmt(br, 1)}°T ±${fmt(db, 1)}° · `
-          + `rng ${fmt(c.observed_range_m / 1852, 2)} NM ±${fmt((c.range_uncertainty_m || 0) / 1852, 2)}`)
+          + `rng ${fmt(c.observed_range_m / 1852, 2)} NM ±${fmt((c.range_uncertainty_m || 0) / 1852, 2)}`
+          + (fixed ? " · SUPERSEDED by a two-camera fix; kept to show what one camera "
+                   + "alone could tell you" : ""))
         .on("click", () => select(rec.record_id));
       obsPt = destination(pose.lat_deg, pose.lon_deg, br, c.observed_range_m);
       pts.push(obsPt);
@@ -1681,7 +2259,113 @@ function renderMap() {
     }
   }
 
-  if (!fitted && pts.length > 1) { MAP.fitBounds(L.latLngBounds(pts).pad(0.12)); fitted = true; }
+  /* ---- CROSS-CAMERA FIXES -------------------------------------------------
+     Drawn LAST so they sit on top of the monocular quads they replace, and drawn as a
+     1-sigma ellipse rather than a dot for the same reason the quad is not a dot: it is
+     the honest shape of the uncertainty. Seeing the small ellipse inside the long quad
+     is the entire argument for the second camera, made without a word of explanation.
+
+     A fix is attached to a CONTACT id, not to a record id: the pipeline reasons about
+     camera A's contacts, and server.py keys the lookup by BOTH cameras' ids so the
+     same fix is found from either side. */
+  /* Collected during the contact pass above, drawn after. The position is the
+     TWO-CAMERA FIX where one exists and the single-camera observation otherwise, so the
+     mark sits on the best position the tool has rather than on a consistent but worse
+     one. */
+  GLYPH_ITEMS = [];
+  for (const rec of S.records.values()) {
+    const c = rec.eo_contact;
+    if (!c) continue;
+    const fx = (S.stage.fix_by_contact || {})[c.contact_id];
+    let lat = null, lon = null;
+    if (fx && fx.usable_for_position && fx.lat_deg != null) {
+      lat = fx.lat_deg; lon = fx.lon_deg;
+    } else if (pose.lat_deg !== undefined && c.observed_range_m) {
+      const q = destination(pose.lat_deg, pose.lon_deg,
+                            c.observed_bearing_deg_true, c.observed_range_m);
+      lat = q[0]; lon = q[1];
+    }
+    if (lat == null) continue;
+    GLYPH_ITEMS.push({ lat, lon, label: rec.verdict?.label || "UNKNOWN",
+                       rid: rec.record_id, cid: c.contact_id, fixed: !!fx });
+  }
+
+  const fixes = S.stage.fixes || [];
+  for (const f of fixes) {
+    if (!f.usable_for_position || f.lat_deg == null) continue;
+    const selected = [...S.records.values()].some(
+      r => r.record_id === S.selected && r.eo_contact
+           && (f.contact_ids || []).includes(r.eo_contact.contact_id));
+    const ell = ellipsePolygon(f.lat_deg, f.lon_deg,
+                               f.sigma_major_m || 1, f.sigma_minor_m || 1,
+                               f.ellipse_orientation_deg || 0);
+    L.polygon(ell, { color: "#5ad1c8", weight: selected ? 4 : 3,
+                     fillColor: "#5ad1c8", fillOpacity: selected ? .35 : .18 })
+      .addTo(LAYER)
+      .bindTooltip(`CROSS-FIX ${(f.contact_ids || []).join(" + ")} · `
+        + `${f.station_count} cameras · crossing ${fmt(f.crossing_angle_deg, 0)}° · `
+        + `1σ ${fmt(f.sigma_major_m, 0)} × ${fmt(f.sigma_minor_m, 0)} m`);
+    /* THE HULL, TO SCALE, INSIDE THE ELLIPSE OF WHERE IT MIGHT BE.
+       Length and heading are the CAMERA-OBSERVED ones, taken from whichever of the
+       paired contacts the console holds. Claimed length is deliberately not used: it is
+       the field a length-spoof lies about, and drawing the map's hull from it would put
+       the lie on screen to scale. When no observed length exists the glyph is skipped
+       and the small marker below stands in — an absent hull is better than an assumed
+       one. */
+    let fc = null;
+    for (const rec of S.records.values())
+      if (rec.eo_contact && (f.contact_ids || []).includes(rec.eo_contact.contact_id))
+        { fc = rec; break; }
+    const oc = fc && fc.eo_contact;
+    const vcol = { MATCH: "#b6c6d6", DARK: "#ffb64d", SPOOF: "#ff9090",
+                   UNKNOWN: "#c9a6ff" }[fc?.verdict?.label || "UNKNOWN"] || "#c9a6ff";
+    if (oc && oc.observed_length_m) {
+      L.polygon(hullPolygon(f.lat_deg, f.lon_deg, oc.observed_length_m,
+                            oc.observed_heading_deg_true ?? oc.observed_bearing_deg_true),
+        { color: vcol, weight: selected ? 3 : 2, fillColor: vcol, fillOpacity: .95 })
+        .addTo(LAYER)
+        .bindTooltip(`${fc.verdict?.label || "UNKNOWN"} · hull drawn to the OBSERVED `
+          + `length ${fmt(oc.observed_length_m, 0)} m on the observed heading. The `
+          + `ellipse around it is where it might be (1σ `
+          + `${fmt(f.sigma_major_m, 0)} × ${fmt(f.sigma_minor_m, 0)} m) — the fix is `
+          + `still coarser than the ship.`)
+        .on("click", () => select(fc.record_id));
+    } else {
+      L.circleMarker([f.lat_deg, f.lon_deg],
+        { radius: 4, color: "#5ad1c8", weight: 2, fillColor: "#5ad1c8", fillOpacity: 1 })
+        .addTo(LAYER);
+    }
+    /* The two bearing rays that made it. Without them the ellipse is an assertion;
+       with them it is visibly the intersection of two measurements. */
+    sensors.forEach(sp => {
+      if (sp.lat_deg === undefined) return;
+      L.polyline([[sp.lat_deg, sp.lon_deg], [f.lat_deg, f.lon_deg]],
+        { color: "#5ad1c8", weight: 1, opacity: .45, dashArray: "3 6",
+          interactive: false }).addTo(LAYER);
+    });
+    pts.push([f.lat_deg, f.lon_deg]);
+  }
+
+  /* Fit once -- and again if the pane's box changed enough that the old fit no longer
+     frames the picture. Pressing `v` roughly doubles the map's area, and a fit computed
+     for the small box leaves every contact huddled in one corner of the big one, which
+     is what the operator layout looked like. `fittedFor` records the box the current
+     fit was computed against; a change of more than 15% in either dimension earns a
+     refit. It is NOT refitted on every render -- an operator who has panned or zoomed
+     to look at something keeps their view. */
+  /* A single NaN or null in `pts` makes latLngBounds span the globe and fitBounds
+     drop the map to zoom 0 — a black world map where a strait should be. Filtered
+     rather than trusted: pts is assembled from a dozen optional sources above. */
+  const fitPts = pts.filter(p => Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1])
+                                 && Math.abs(p[0]) <= 90 && Math.abs(p[1]) <= 180);
+  const box = MAP.getSize ? [MAP.getSize().x, MAP.getSize().y] : [0, 0];
+  const grew = fittedFor && (Math.abs(box[0] - fittedFor[0]) > fittedFor[0] * 0.15
+                          || Math.abs(box[1] - fittedFor[1]) > fittedFor[1] * 0.15);
+  if ((!fitted || grew) && fitPts.length > 1) {
+    MAP.fitBounds(L.latLngBounds(fitPts).pad(0.12));
+    fitted = true; fittedFor = box;
+  }
+  renderGlyphs();
 }
 </script>
 
@@ -2128,6 +2812,92 @@ function tickClock() {
   $("tClock").textContent = new Date().toISOString().slice(11, 19);
 }
 
+/* ===========================================================================
+   LAYOUT. Three independent toggles, each remembered.
+   =========================================================================== */
+
+/* localStorage is wrapped everywhere it is touched. A private window, a browser with
+   site data blocked, or a screenshot service will throw on the GETTER, not on the read
+   of a missing key — and an exception here would take the whole boot down over a
+   remembered preference. The console must open with defaults, not fail. */
+function pref(k, v) {
+  try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); }
+  catch { return null; }
+}
+
+function setLayout(mode) {
+  const op = mode === "operator";
+  $("app").classList.toggle("operator", op);
+  $("tLayout").textContent = op ? "operator" : "console";
+  pref("layout", mode);
+  /* The map pane changes size in both directions when the layout flips, and the map is
+     the one component whose geometry is computed rather than laid out. Both backends
+     are told; the shim watches its own box with a ResizeObserver, so this is belt and
+     braces for real Leaflet, which does not. */
+  requestAnimationFrame(() => {
+    if (MAP && typeof MAP.invalidateSize === "function") MAP.invalidateSize();
+    if (MAP && typeof MAP._redraw === "function") MAP._redraw();
+    renderGlyphs();
+  });
+}
+
+function setPip(min) {
+  $("app").classList.toggle("pipmin", !!min);
+  pref("pipmin", min ? "1" : "0");
+  const h = document.querySelector('.pane[aria-label="Live sensor"] > h2');
+  if (h) h.dataset.act = min ? "expand" : "minimise";
+  /* The <img> is NOT torn down when minimised — see the CSS note. Re-opening a
+     collapsed pane onto a three-second black rectangle reads as a broken feed, and the
+     stream costs nothing to keep while hidden. */
+}
+
+function setRail(shut) {
+  $("app").classList.toggle("railshut", !!shut);
+  $("railToggle").innerHTML = shut ? "&#8249;" : "&#8250;";
+  pref("railshut", shut ? "1" : "0");
+  requestAnimationFrame(() => {
+    if (MAP && typeof MAP._redraw === "function") MAP._redraw();
+    renderGlyphs();
+  });
+}
+
+function initLayout() {
+  setLayout(pref("layout") === "operator" ? "operator" : "console");
+  setPip(pref("pipmin") === "1");
+  setRail(pref("railshut") === "1");
+
+  const flip = () => setLayout($("app").classList.contains("operator") ? "console" : "operator");
+  $("cLayout").addEventListener("click", flip);
+  $("cLayout").addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); flip(); } });
+
+  /* The PiP title bar IS the minimise control. A separate button would be one more
+     11-px target on a pane that is already small. */
+  const h2 = document.querySelector('.pane[aria-label="Live sensor"] > h2');
+  h2.addEventListener("click", () => {
+    if ($("app").classList.contains("operator"))
+      setPip(!$("app").classList.contains("pipmin"));
+  });
+
+  /* Folded by default in the operator layout, open by default in the review one —
+     each layout's own answer to "is this pane for reading or for pointing at". */
+  const lgOff = pref("legendoff");
+  $("app").classList.toggle("legendoff", lgOff === null ? true : lgOff === "1");
+  const lgFlip = () => {
+    const off = !$("app").classList.contains("legendoff");
+    $("app").classList.toggle("legendoff", off);
+    pref("legendoff", off ? "1" : "0");
+  };
+  $("legendToggle").addEventListener("click", lgFlip);
+  $("legendToggle").addEventListener("keydown", e => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); lgFlip(); } });
+
+  const rt = $("railToggle");
+  rt.addEventListener("click", () => setRail(!$("app").classList.contains("railshut")));
+  rt.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); rt.click(); } });
+
+  addEventListener("resize", renderGlyphs);
+}
+
 async function boot() {
   try { localStorage.getItem("op") && ($("opid").value = localStorage.getItem("op")); } catch {}
   $("opid").addEventListener("change", () => {
@@ -2148,6 +2918,7 @@ async function boot() {
   try { applyState(await fetchState()); }
   catch (e) { setTransport("down", String(e)); }
 
+  initLayout();
   initMap();
   initVideo();
   connect();
@@ -2161,6 +2932,15 @@ async function boot() {
     if (e.key === "ArrowDown") { e.preventDefault(); select(rows[Math.min(rows.length - 1, i + 1)].record_id); }
     if (e.key === "ArrowUp")   { e.preventDefault(); select(rows[Math.max(0, i - 1)].record_id); }
     if (e.key >= "1" && e.key <= "9") { const r = rows[+e.key - 1]; if (r) select(r.record_id); }
+    /* v = flip the layout, m = minimise the picture-in-picture, r = the rail. Single
+       keys because the lectern may have no mouse and a modifier combination is one more
+       thing to remember under lights. */
+    if (e.key === "v") { e.preventDefault(); $("cLayout").click(); }
+    if (e.key === "m" && $("app").classList.contains("operator"))
+      { e.preventDefault(); setPip(!$("app").classList.contains("pipmin")); }
+    if (e.key === "r" && $("app").classList.contains("operator"))
+      { e.preventDefault(); setRail(!$("app").classList.contains("railshut")); }
+    if (e.key === "l") { e.preventDefault(); $("legendToggle").click(); }
   });
 }
 

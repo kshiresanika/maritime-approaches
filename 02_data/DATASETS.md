@@ -80,3 +80,30 @@ modifications, and this project performs both.
 **Obligation status:** `CROSSES_LAND` has never run and the coastline is not on disk,
 so the data is not currently in use. The obligation attaches the moment it is
 downloaded and a land-crossing finding is shown.
+
+---
+
+### Basemap tiles — the one feed whose terms are NOT a clean open licence
+
+Added 2026-08-30, when the tactical map stopped being a blank graticule.
+
+| Feed | Endpoint | Terms | Status |
+|---|---|---|---|
+| **Esri World Dark Gray Base / Reference** — the DEFAULT basemap | `services.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_{Base,Reference}/MapServer/tile/{z}/{y}/{x}` | Esri's public ArcGIS Online basemaps. Served without an API key. Attribution required: *"Tiles © Esri — sources: Esri, HERE, Garmin, © OpenStreetMap contributors"*. Underlying data is OpenStreetMap under **ODbL** plus Esri/HERE/Garmin proprietary sources. **Esri's terms are written for ArcGIS customers and are NOT an open licence** — they are permissive for display with attribution and ambiguous for commercial redistribution. | **IN USE, with the ambiguity stated.** Defensible for a hackathon demo that displays tiles with attribution and caches nothing. **Not** something to build a product on without reading Esri's current terms of use. |
+| **OpenStreetMap standard** — `?tiles=osm` | `{s}.tile.openstreetmap.org/{z}/{x}/{y}.png` | **ODbL**, unambiguous. Subject to the OSMF Tile Usage Policy: no heavy/bulk use, attribution required, no assumption of availability. | **AVAILABLE as the clean fallback.** Light map under a dark console, so it loses contrast — the trade is legibility for licence certainty. |
+| No basemap — `?tiles=0` | none | n/a | The original behaviour: real geometry on a graticule, no network, no terms. |
+
+**What is NOT done with these tiles:** nothing is cached, stored, re-served or shipped
+in the repo. Tiles are fetched live by the viewer's browser and drawn. If that ever
+changes — a pre-baked offline basemap is decision 3 in `04_demo/PROMPT_REAL_BASEMAP.md`
+— **the terms change with it**, because bundling a raster is redistribution, and
+neither Esri's terms nor the OSMF tile policy permit it. A pre-baked basemap must be
+built from a source that allows it (an ODbL extract rendered locally, or a
+public-domain source such as Natural Earth), not by saving tiles from either feed above.
+
+**Rejected, and why it matters:** CARTO `basemaps.cartocdn.com/dark_all` was the first
+choice and was dropped on 2026-08-30. It still returns **HTTP 200 and a valid 256 px
+PNG without an API key** — so every automated check passed — but the image now has
+*"API Key required"* tiled across it. A feed that fails by serving a watermark rather
+than an error cannot be detected downstream and is visible to everyone in the room.
+Found by rendering candidate tiles side by side and looking at them.

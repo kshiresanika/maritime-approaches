@@ -182,6 +182,30 @@ promoted**. Nothing in either is stubbed.
 
 ---
 
+## 3b. Six console defects, found by rendering the page and measuring the DOM
+
+None of these is visible by reading the code. All were found by running the real server
+under a headless browser and measuring what the layout actually resolved to.
+
+| # | Symptom | Cause | Fix |
+|---|---|---|---|
+| 1 | `WEBSOCKET DOWN`; console polling every 2 s | uvicorn answers **404** to a WebSocket upgrade when no ws implementation is installed, and does not warn. `pip install uvicorn` does not bring one; `uvicorn[standard]` does. The console had always been on its fallback. | `pip install websockets`. `main.py` preflight now checks for it — loud, non-fatal. |
+| 2 | Right-hand panes clipped — "cut off" | `#app`'s grid column defaulted to `auto` and sized to the header's **max-content** width of 1938 px. `#grid`'s `1fr 1fr` then divided 1938, not the viewport, and `body{overflow:hidden}` clipped the remainder. | `minmax(0,1fr)` on both grids; `flex-wrap` on the header. |
+| 3 | Bottom 188 px empty; priority queue squeezed to 136 px, showing 1 of 8 contacts | `display:none` removes an element from a grid rather than collapsing its row, so with both banners hidden every pane moved up one row. **Hidden by defect 1** — the socket-down banner always filled row 1, so the layout looked right for the wrong reason. | Explicit `grid-row` on every child of `#grid`. |
+| 4 | Detection boxes offset from the hulls | `#feed` rendered 719×404 while the SVG overlay rendered 719×286: a percentage `max-height` resolved against a grid row that is sized by its own item is circular, so the browser dropped it. Two scales, two origins — **every box had always been in the wrong place**. | Both layers absolutely positioned over one box; `object-fit:contain` now matches `preserveAspectRatio="xMidYMid meet"` exactly. |
+| 5 | `MAP LIBRARY UNAVAILABLE` — no tactical picture | The map's *drawing* was made offline-safe (tiles are opt-in), but the drawing *library* still came from a CDN. So the one pane carrying criterion 2 was the only pane wifi could knock out. | A ~180-line SVG shim exposing the seven Leaflet calls this console uses, installed as `window.L` only when the real Leaflet is absent. `renderMap()` is unchanged and does not know which backend it has. |
+| 6 | Export evidence produced nothing usable | `/evidence/{id}` only ever returned raw JSON and the button `window.open`ed it, so `evidence.py`'s `render_markdown()` — the readable case file — was never reachable over HTTP. | `?format=html` (rendered, printable, with .md/.json links), `?format=md` (download), `?format=json` (unchanged default). |
+
+### And one regression of my own, reverted
+
+`--video` was made to promote `VIDEO_STREAM` and start a node. That replaced the recorded
+picture — 8 contacts, 3 SPOOF / 2 DARK / 2 UNKNOWN / 1 MATCH — with what a background
+subtractor finds in a short clip: two blobs, no identities, two DARK. Nothing errored; a
+good picture was quietly swapped for a poor one. `--live` now does both, and `--video`
+alone only supplies imagery.
+
+---
+
 ## 4. The three things that will bite
 
 | Trap | What happens | Why |

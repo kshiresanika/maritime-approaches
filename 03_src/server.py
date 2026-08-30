@@ -110,6 +110,7 @@ for _p in (str(_SRC), str(_DEMO)):
         sys.path.insert(0, _p)
 
 import evidence as evidence_mod            # noqa: E402
+import multiview as multiview_mod           # noqa: E402  (lane G)
 import run_pipeline                        # noqa: E402
 from contracts import (                    # noqa: E402
     ConsoleState,
@@ -273,6 +274,7 @@ class ConsoleBackend:
         node_stale_after_s: float = NODE_STALE_AFTER_S,
         allow_real_identities: bool = False,
         initial_source: str = DEFAULT_SOURCE,
+        sensor_scenes: "Sequence[Path]" = (),
     ) -> None:
         self._lock = asyncio.Lock()
         self._audit_path = audit_path
@@ -305,6 +307,60 @@ class ConsoleBackend:
         self._demo = _DemoState()
         self._demo.scene = run_pipeline.load_scene(scene_dir)
         self.scene_dir = scene_dir
+
+        # ================= THE POSE REGISTRY — LANE G ==============================
+        #
+        # WHY A REGISTRY AND NOT A FIELD ON THE CONTACT. An EoContact names its camera
+        # with `camera_pose_ref`, a STRING. It does not carry the camera's position, and
+        # it must not: a contact that carried its own station's coordinates would let
+        # one record be edited and not another, and a fix computed from two disagreeing
+        # versions of where the same camera stood would be confidently wrong with
+        # nothing to catch it. One registry, one answer for where each sensor is.
+        #
+        # A SECOND CAMERA IS A SECOND SCENE DIRECTORY, not a second pipeline.
+        # make_second_view.py writes camera B's pose, its own EoContacts and its own
+        # video into 04_demo/out/scene01b. Registering the pose is what lets a bearing
+        # from that camera be resolved to a ray; loading its contacts is what gives the
+        # RECORDED path something to cross-fix against. On the LIVE path a second node
+        # posts its own contacts and the registry is all that is needed.
+        primary_pose = ((self._demo.scene or {}).get("manifest") or {}).get("pose") or {}
+        self._primary_pose_ref: str | None = primary_pose.get("pose_ref")
+        self._poses: dict[str, dict[str, Any]] = {}
+        self._sensor_poses: list[dict[str, Any]] = []
+        self._extra_contacts: list[EoContact] = []
+        if self._primary_pose_ref:
+            self._poses[self._primary_pose_ref] = primary_pose
+            self._sensor_poses.append({**primary_pose, "role": "primary"})
+
+        for extra in sensor_scenes:
+            try:
+                sc = run_pipeline.load_scene(Path(extra))
+            except Exception as exc:                       # noqa: BLE001
+                # LOUD, AND NOT FATAL. A missing second camera must not stop the shore
+                # station: the single-camera picture is the guaranteed one and losing
+                # the upgrade layer is not losing the demo. Printed rather than
+                # swallowed so "the overlap pane is empty" has a cause on the terminal.
+                print(f"[server] sensor scene {extra} not loaded: "
+                      f"{type(exc).__name__}: {exc}", file=sys.stderr)
+                continue
+            pose = (sc.get("manifest") or {}).get("pose") or {}
+            ref = pose.get("pose_ref")
+            if not ref or ref in self._poses:
+                print(f"[server] sensor scene {extra} has no distinct pose_ref "
+                      f"({ref!r}) — skipped", file=sys.stderr)
+                continue
+            self._poses[ref] = pose
+            self._sensor_poses.append({**pose, "role": "secondary"})
+            self._extra_contacts.extend(sc.get("contacts", []))
+            print(f"[server] sensor registered: {ref} at "
+                  f"{pose.get('lat_deg'):.5f},{pose.get('lon_deg'):.5f} "
+                  f"bore {pose.get('boresight_deg_true'):.1f}T "
+                  f"({len(sc.get('contacts', []))} recorded contacts)")
+
+        # Computed at the end of every recompute; empty until then and empty whenever
+        # only one camera has contacts, which is the ordinary state outside the overlap.
+        self._fixes: list[dict[str, Any]] = []
+        self._fix_by_contact: dict[str, dict[str, Any]] = {}
 
         # Stream bookkeeping.
         self._seq = 0
@@ -692,7 +748,47 @@ class ConsoleBackend:
         unresolved = [c for c in source_contacts
                       if c.contact_id not in contacts_in_records]
 
+        # ============ CROSS-CAMERA FIXES — LANE G ==================================
+        #
+        # Run AFTER the pipeline and OUTSIDE the lock, alongside it rather than inside
+        # it: this changes no verdict, no confidence and no rank. It adds a better
+        # POSITION for hulls two cameras can both see, and nothing else. If it raises,
+        # the single-camera picture is untouched — which is why it is wrapped.
+        #
+        # THE CONTACT SET IS THE UNION, AND THE DUPLICATE GUARD IS LOAD-BEARING. On the
+        # LIVE path a second node's contacts are already in `source_contacts`, because
+        # _fuse_live_contacts() merges every live node. On the RECORDED path they are
+        # not, and come from the second scene directory. Adding both without the id
+        # guard would offer camera B's contacts to the solver twice, and the assignment
+        # would happily pair a contact with its own duplicate — a "fix" at zero baseline
+        # that the crossing-angle gate would reject, but only by luck.
+        fixes: list[dict[str, Any]] = []
+        by_contact: dict[str, dict[str, Any]] = {}
+        if len(self._poses) >= 2:
+            try:
+                seen_ids = {c.contact_id for c in source_contacts}
+                # THE RECORDED SECOND CAMERA IS ONLY POOLED FOR A RECORDED PICTURE.
+                # On the live path both cameras' contacts are already in
+                # `source_contacts` — _fuse_live_contacts() merges every live node — and
+                # adding the stored ones would offer the solver a live bearing and a
+                # bearing from whenever the scene was generated. See patch_timegate.py:
+                # that pairing produced a small, confident fix at a position no hull
+                # ever occupied.
+                extra = ([] if self._demo.mode == "live" else [
+                    c for c in self._extra_contacts if c.contact_id not in seen_ids])
+                pool = list(source_contacts) + extra
+                cfs = await asyncio.to_thread(
+                    multiview_mod.cross_fix, pool, self._poses,
+                    primary=self._primary_pose_ref)
+                fixes = [cf.to_dict() for cf in cfs]
+                by_contact = multiview_mod.fixes_by_contact(cfs)
+            except Exception as exc:                       # noqa: BLE001
+                print(f"[server] cross-fix pass failed: {type(exc).__name__}: {exc}",
+                      file=sys.stderr)
+
         async with self._lock:
+            self._fixes = fixes
+            self._fix_by_contact = by_contact
             self._records = records
             self._public_records = public
             self._records_by_id = {r.record_id: r for r in records}
@@ -1364,6 +1460,14 @@ class ConsoleBackend:
             # A separate endpoint for the badge could fail on its own and leave the
             # screen confidently naming a source that stopped being live.
             body["source"] = self.source.status()
+            # LANE G. `sensors` is every camera the station knows about, primary first,
+            # so the map can draw one field-of-view wedge per sensor and the overlap
+            # between them. `fixes` is the cross-camera positions. Both are published
+            # even when there is only one sensor and no fix — an absent key and an empty
+            # list read identically to a console, and only one of them is a statement.
+            body["sensors"] = list(self._sensor_poses)
+            body["fixes"] = list(self._fixes)
+            body["fix_by_contact"] = dict(self._fix_by_contact)
         body["last_update"] = self._demo.last_update
         body["server_seq"] = self._seq
         return body
@@ -1801,6 +1905,7 @@ def create_app(
     allow_real_identities: bool,
     video_source: "str | int | None" = None,
     frame_stale_after_s: float = 5.0,
+    sensor_scenes: "Sequence[Path]" = (),
     node_stale_after_s: float,
     initial_source: str = DEFAULT_SOURCE,
     startup_tasks: "Sequence[Any]" = (),
@@ -1939,7 +2044,8 @@ def create_app(
     backend = ConsoleBackend(scene_dir, audit_path=audit_path,
                              node_stale_after_s=node_stale_after_s,
                              allow_real_identities=allow_real_identities,
-                             initial_source=initial_source)
+                             initial_source=initial_source,
+                             sensor_scenes=sensor_scenes)
     # Set BEFORE the lifespan's startup recompute, so the first picture a browser sees
     # was computed under the same coverage assumption as every later one.
     if ais_coverage_confidence is not None:
@@ -2572,6 +2678,14 @@ def main(argv: list[str] | None = None) -> int:
                         "and looped so the clip outlasts the pitch. Run the sensor "
                         "node on the SAME source with --publish-frames so the boxes "
                         "and the imagery are one observation.")
+    p.add_argument("--sensor-scene", type=Path, action="append", default=[],
+                   dest="sensor_scenes", metavar="DIR",
+                   help="A SECOND CAMERA. Repeatable. Each directory is a scene "
+                        "written by 04_demo/make_second_view.py: its manifest declares "
+                        "where that camera stands, and its eo_contacts.jsonl gives the "
+                        "RECORDED path something to cross-fix against. Registering a "
+                        "pose is what turns a bearing into a ray; two rays that cross "
+                        "CONSTRUCT a range instead of estimating one.")
     p.add_argument("--node-stale-after", type=float, default=NODE_STALE_AFTER_S,
                    help="Seconds of silence after which a node is believed offline. "
                         "This is the online/offline policy threshold contracts.py "
@@ -2605,6 +2719,7 @@ def main(argv: list[str] | None = None) -> int:
         mjpeg_url=args.mjpeg_url,
         camera_index=args.camera,
         video_source=args.video,
+        sensor_scenes=args.sensor_scenes,
         allow_real_identities=args.allow_real_identities,
         node_stale_after_s=args.node_stale_after,
         initial_source=args.initial_source,

@@ -565,6 +565,15 @@ examples
     p.add_argument("--loop", action="store_true",
                    help="rewind a video file at the end, so the clip outlasts the "
                         "pitch instead of the sensor going dark mid-sentence")
+    p.add_argument("--scene-b", type=Path, action="append", default=[],
+                   dest="sensor_scenes", metavar="DIR",
+                   help="A SECOND CAMERA WITH AN OVERLAPPING FIELD OF VIEW. Repeatable. "
+                        "Build one with 04_demo/make_second_view.py. Its pose is "
+                        "registered so the map can draw its wedge and the overlap, and "
+                        "its contacts are cross-fixed against the first camera's: two "
+                        "bearings that cross CONSTRUCT a position, where one bearing "
+                        "plus a waterline only estimates one. MEASURED: the 1250x218 m "
+                        "monocular sliver becomes a ~300x160 m ellipse.")
     p.add_argument("--node-id", default="sensor-01",
                    help="provenance. Appears on every contact and in the case file.")
     p.add_argument("--min-area", type=int, default=120,
@@ -676,6 +685,7 @@ examples
         # twice, and the node needs it more than the pane does.
         camera_index=None,
         video_source=(args.video if args.video is not None else None),
+        sensor_scenes=args.sensor_scenes,
         allow_real_identities=args.allow_real_identities,
         node_stale_after_s=8.0,
         # RECORDED UNLESS ASKED OTHERWISE. This reverses patch 7, which made --video

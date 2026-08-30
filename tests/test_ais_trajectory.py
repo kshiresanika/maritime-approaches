@@ -284,3 +284,47 @@ def test_from_frames_track_ids_match_ais_ingest():
     })
     out = from_frames([frame], "slice_x")
     assert out["track_id"].iloc[0] == make_track_id("slice_x", "219000001")
+
+
+# --------------------------------------------------------------------------------
+# The movingpandas timezone boundary. movingpandas applies `df.tz_localize(None)` to
+# every trajectory it builds, so everything read back OUT of a TrajectoryCollection
+# is tz-naive while the point table it was built FROM stays datetime64[ns, UTC].
+# Comparing the two raises TypeError, which is how this was found — nine tests at
+# once. These three tests pin the repaired contract: UTC in, UTC out, at every
+# crossing. Without them the fix survives only as long as nobody touches the module.
+# --------------------------------------------------------------------------------
+
+def test_kinematics_table_comes_back_timezone_aware():
+    """`report_time_utc` is the join key onto the AisTrack table, which is UTC-aware.
+    A naive column here joins to nothing and reports it as no matches, not an error."""
+    frame = points([("A", i * 60, 54.600 + i * 0.001, 11.30, 5.0, "Under way using engine")
+                    for i in range(4)])
+    table = implied_kinematics_table(add_kinematics(build_trajectories(frame)))
+    assert table["report_time_utc"].dt.tz is not None
+    assert str(table["report_time_utc"].dt.tz) == "UTC"
+
+
+def test_event_timestamps_are_timezone_aware_utc():
+    """The field is named t_start_utc. If it carries a naive timestamp the evidence
+    record states a time with no zone — and criterion 4 output has to survive being
+    read by someone in another timezone months later."""
+    frame = points([("A", i * 300, 54.600, 11.30, 0.0, "Moored") for i in range(13)])
+    event = detect_loiter(add_kinematics(build_trajectories(frame)), frame,
+                          min_duration=timedelta(minutes=30))[0]
+    assert event.t_start_utc.tzinfo is not None
+    assert event.t_end_utc.tzinfo is not None
+    assert event.t_start_utc.utcoffset() == timedelta(0)
+
+
+def test_naive_input_is_accepted_and_treated_as_utc():
+    """A caller who hands in a naive point table must not get a TypeError from deep
+    inside pandas. Naive is assumed UTC — the column is populated from
+    AisTrack.report_time_utc — and the comparison must still work."""
+    frame = points([("A", i * 300, 54.600, 11.30, 0.0, "Moored") for i in range(13)])
+    frame["t"] = frame["t"].dt.tz_localize(None)
+    events = detect_loiter(add_kinematics(build_trajectories(frame)), frame,
+                           min_duration=timedelta(minutes=30))
+    assert events, "naive input produced no events"
+    # The claims lookup is the comparison that used to raise.
+    assert events[0].claimed_nav_statuses == ("Moored",)
